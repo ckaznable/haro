@@ -1,0 +1,5 @@
+CREATE TABLE IF NOT EXISTS scratchpad (
+    bot_id TEXT PRIMARY KEY,
+    content TEXT NOT NULL DEFAULT '',
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);

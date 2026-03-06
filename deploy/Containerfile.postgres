@@ -1,0 +1,21 @@
+FROM docker.io/postgres:16-bookworm
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        postgresql-server-dev-16 \
+        wget \
+        ca-certificates \
+    # SCWS (Simple Chinese Word Segmentation)
+    && wget -qO- http://www.xunsearch.com/scws/down/scws-1.2.3.tar.bz2 | tar xj \
+    && cd scws-1.2.3 && ./configure && make -j"$(nproc)" && make install \
+    && cd .. && rm -rf scws-1.2.3 \
+    # zhparser
+    && wget -qO- https://github.com/amutu/zhparser/archive/refs/heads/master.tar.gz | tar xz \
+    && cd zhparser-master && make && make install \
+    && cd .. && rm -rf zhparser-master \
+    # cleanup
+    && apt-get purge -y --auto-remove build-essential postgresql-server-dev-16 wget \
+    && rm -rf /var/lib/apt/lists/* \
+    && ldconfig
+
+COPY init-extensions.sql /docker-entrypoint-initdb.d/
