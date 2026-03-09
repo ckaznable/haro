@@ -180,6 +180,64 @@ pub async fn insert_token_usage(
     Ok(())
 }
 
+// ── 批次入庫暫存 ──
+
+/// 將訊息寫入 pending_ingest 暫存表
+pub async fn insert_pending_ingest(
+    pool: &PgPool,
+    agent_id: &str,
+    text: &str,
+    worker_model: &str,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO pending_ingest (agent_id, text, worker_model) VALUES ($1, $2, $3)",
+    )
+    .bind(agent_id)
+    .bind(text)
+    .bind(worker_model)
+    .execute(pool)
+    .await
+    .context("寫入 pending_ingest 失敗")?;
+
+    Ok(())
+}
+
+/// 暫存項目
+#[derive(FromRow)]
+pub struct PendingIngestRow {
+    pub id: i64,
+    pub agent_id: String,
+    pub text: String,
+    pub worker_model: String,
+}
+
+/// 取出最多 limit 筆待處理項目（按建立時間排序）
+pub async fn fetch_pending_ingest(pool: &PgPool, limit: i64) -> Result<Vec<PendingIngestRow>> {
+    let rows = sqlx::query_as::<_, PendingIngestRow>(
+        "SELECT id, agent_id, text, worker_model FROM pending_ingest ORDER BY created_at LIMIT $1",
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .context("讀取 pending_ingest 失敗")?;
+
+    Ok(rows)
+}
+
+/// 刪除已處理的暫存項目
+pub async fn delete_pending_ingest(pool: &PgPool, ids: &[i64]) -> Result<()> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    sqlx::query("DELETE FROM pending_ingest WHERE id = ANY($1)")
+        .bind(ids)
+        .execute(pool)
+        .await
+        .context("刪除 pending_ingest 失敗")?;
+
+    Ok(())
+}
+
 // ── 備忘錄 ──
 
 /// 寫入或更新備忘錄（upsert）

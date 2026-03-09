@@ -1015,6 +1015,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
+ "futures",
  "qdrant-client",
  "reqwest 0.13.2",
  "serde",

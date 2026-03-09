@@ -130,6 +130,7 @@ async fn main() -> Result<()> {
             agents.push(agent::Agent {
                 id: "default".into(),
                 path: None,
+                mode: agent::AgentMode::default(),
                 prompt: String::new(),
                 soul: String::new(),
                 channels,

@@ -4,7 +4,7 @@ use anyhow::Result;
 use tokio::task::JoinHandle;
 use tracing::{error, info};
 
-use crate::agent::Agent;
+use crate::agent::{Agent, AgentMode};
 use crate::api::{self, LlmProvider};
 use crate::channel::{CommandRegistry, MessageHandler};
 use crate::config::AppConfig;
@@ -37,6 +37,7 @@ pub fn spawn_all(
 
     for agent in agents {
         let agent_id = agent.id;
+        let agent_mode = agent.mode;
         let agent_prompt = agent.prompt;
         let agent_soul = agent.soul;
         let agent_heartbeat = agent.heartbeat;
@@ -87,6 +88,37 @@ pub fn spawn_all(
         // 心跳查看/編輯指令
         if let Some(ref apath) = agent_path {
             register_heartbeat_commands(&mut cmd_registry, apath);
+        }
+
+        // ingest 模式：註冊 /ask 指令，用於查詢向量資料庫
+        if agent_mode == AgentMode::Ingest {
+            let ask_ctx = Arc::new(MessageContext {
+                pg: Arc::clone(&res.pg),
+                qdrant: Arc::clone(&res.qdrant),
+                embedder: Arc::clone(&res.embedder),
+                llm: Arc::clone(&res.llm),
+                worker: Arc::clone(&res.worker),
+                agent_id: agent_id.clone(),
+                prompt: agent_prompt.clone(),
+                soul: agent_soul.clone(),
+                worker_model: cfg.worker.model.clone(),
+                llm_model: cfg.llm.model.clone(),
+            });
+            cmd_registry.register(
+                "ask",
+                "查詢已收集的資料",
+                "/ask <問題>",
+                Arc::new(move |_sender, args| {
+                    let ctx = Arc::clone(&ask_ctx);
+                    Box::pin(async move {
+                        let question = args.trim();
+                        if question.is_empty() {
+                            return Ok("用法: /ask <問題>".into());
+                        }
+                        handle_query(&ctx, question).await
+                    })
+                }),
+            );
         }
 
         // LLM 互動指令（來自 cmd.toml）
@@ -173,6 +205,23 @@ pub fn spawn_all(
 
         let commands = Arc::new(cmd_registry);
 
+        // ingest 模式：建立批次入庫佇列 + 背景任務
+        let ingest_queue = if agent_mode == AgentMode::Ingest {
+            let (queue, batch_handle) = search::spawn_batch_ingest(search::BatchIngestConfig {
+                pg: Arc::clone(&res.pg),
+                qdrant: Arc::clone(&res.qdrant),
+                embedder: Arc::clone(&res.embedder),
+                worker: Arc::clone(&res.worker),
+                batch_size: 10,
+                flush_interval: std::time::Duration::from_secs(5),
+            });
+            handles.push(batch_handle);
+            info!(agent_id = %agent_id, "批次入庫背景任務已啟動");
+            Some(queue)
+        } else {
+            None
+        };
+
         for channel in agent.channels {
             let msg_ctx = Arc::new(MessageContext {
                 pg: Arc::clone(&res.pg),
@@ -187,9 +236,25 @@ pub fn spawn_all(
                 llm_model: cfg.llm.model.clone(),
             });
 
+            let mode = agent_mode.clone();
+            let queue = ingest_queue.clone();
             let handler: MessageHandler = Arc::new(move |msg| {
                 let ctx = Arc::clone(&msg_ctx);
-                Box::pin(async move { handle_message(&ctx, &msg).await })
+                let mode = mode.clone();
+                let queue = queue.clone();
+                Box::pin(async move {
+                    match mode {
+                        AgentMode::Chat => handle_message(&ctx, &msg).await,
+                        AgentMode::Ingest => {
+                            if let Some(q) = &queue {
+                                q.push(&ctx.agent_id, &msg.text, &ctx.worker_model).await?;
+                                Ok("✓".into())
+                            } else {
+                                handle_ingest(&ctx, &msg.text).await
+                            }
+                        }
+                    }
+                })
             });
 
             let cmds = Arc::clone(&commands);
@@ -265,52 +330,30 @@ struct MessageContext {
     llm_model: String,
 }
 
-/// 處理單則訊息（RAG 流程）
-async fn handle_message(
-    ctx: &MessageContext,
-    msg: &crate::channel::IncomingMessage,
-) -> Result<String> {
-    // 0. 載入備忘錄
+/// 僅入庫（ingest 模式），不呼叫 LLM 回覆
+async fn handle_ingest(ctx: &MessageContext, text: &str) -> Result<String> {
+    let (_, wk_usage) =
+        search::ingest(&ctx.pg, &ctx.qdrant, ctx.embedder.as_ref(), ctx.worker.as_ref(), &ctx.agent_id, text).await?;
+
+    db::postgres::insert_token_usage(&ctx.pg, &ctx.agent_id, &ctx.worker_model, wk_usage.input_tokens, wk_usage.output_tokens).await?;
+
+    Ok("✓".into())
+}
+
+/// 查詢（不入庫）：檢索記憶 + LLM 回答
+async fn handle_query(ctx: &MessageContext, question: &str) -> Result<String> {
     let memo = db::postgres::get_scratchpad(&ctx.pg, &ctx.agent_id)
         .await?
         .unwrap_or_default();
 
-    // 1. 入庫（worker 蒸餾 + embedder 向量化）
-    let (_, wk_usage) =
-        search::ingest(&ctx.pg, &ctx.qdrant, ctx.embedder.as_ref(), ctx.worker.as_ref(), &ctx.agent_id, &msg.text).await?;
+    let results = search::retrieve(&ctx.pg, &ctx.qdrant, ctx.embedder.as_ref(), &ctx.agent_id, question, 5).await?;
 
-    db::postgres::insert_token_usage(&ctx.pg, &ctx.agent_id, &ctx.worker_model, wk_usage.input_tokens, wk_usage.output_tokens).await?;
-
-    // 2. 混合搜尋取回相關記憶
-    let results = search::retrieve(&ctx.pg, &ctx.qdrant, ctx.embedder.as_ref(), &ctx.agent_id, &msg.text, 5).await?;
-
-    // 3. 載入近期歷史（填充至 ~5000 token）
-    let recent = db::postgres::get_recent_messages(&ctx.pg, &ctx.agent_id, 50).await?;
-    const HISTORY_MAX_TOKENS: i32 = 5000;
-    let mut history_parts = Vec::new();
-    let mut total_tokens = 0i32;
-    for (text, token_count) in &recent {
-        if total_tokens + token_count > HISTORY_MAX_TOKENS {
-            break;
-        }
-        history_parts.push(text.as_str());
-        total_tokens += token_count;
-    }
-    history_parts.reverse();
-    let history = if history_parts.is_empty() {
-        "（無近期歷史）".to_owned()
-    } else {
-        history_parts.join("\n---\n")
-    };
-
-    // 4. 建立工具
     let mut tools = tool::ToolRegistry::new();
     for t in tool::scratchpad::tools(Arc::clone(&ctx.pg), ctx.agent_id.clone()) {
         tools.register(t);
     }
     tools.register(tool::fetch::tool());
 
-    // 5. 組合上下文，用主 LLM 帶工具生成回答
     let context_str: String = results
         .iter()
         .enumerate()
@@ -318,14 +361,8 @@ async fn handle_message(
         .collect::<Vec<_>>()
         .join("\n\n");
 
-    let memo_section = if memo.is_empty() {
-        "（空）".to_owned()
-    } else {
-        memo
-    };
-
+    let memo_section = if memo.is_empty() { "（空）".to_owned() } else { memo };
     let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %:z");
-
     let soul_section = if ctx.soul.is_empty() {
         String::new()
     } else {
@@ -333,26 +370,36 @@ async fn handle_message(
     };
 
     let system = format!(
-        "你是一個具有長期記憶的 AI 助手。\n\n\
+        "你是一個知識庫助手，根據已收集的資料回答問題。\n\n\
          目前時間：{now}\n\n\
          {soul_section}\
          {}\n\n\
          ## 備忘錄 (Scratchpad)\n{memo_section}\n\n\
-         ## 相關記憶\n{context_str}\n\n\
-         ## 近期對話歷史\n{history}\n\n\
+         ## 相關資料\n{context_str}\n\n\
          ## 指示\n\
-         請根據備忘錄、歷史記憶和近期對話與使用者的新訊息，給出自然、有幫助的回答。\n\
-         如果記憶中沒有相關資訊，就正常回答即可。\n\
-         如果有重要的事情需要記住（如使用者偏好、關鍵決定、待辦事項），\
-         請使用 save_memo 工具儲存到備忘錄中。",
+         請根據上述資料回答使用者的問題。\n\
+         如果資料中沒有相關內容，請如實告知。\n\
+         如果有重要的事情需要記住，請使用 save_memo 工具儲存。",
         ctx.prompt
     );
 
-    let result = api::chat_with_tools(ctx.llm.as_ref(), &system, &msg.text, &tools).await?;
+    let result = api::chat_with_tools(ctx.llm.as_ref(), &system, question, &tools).await?;
 
     db::postgres::insert_token_usage(&ctx.pg, &ctx.agent_id, &ctx.llm_model, result.input_tokens, result.output_tokens).await?;
 
     Ok(result.text)
+}
+
+/// 處理單則訊息（chat 模式：入庫 + 回覆）
+async fn handle_message(
+    ctx: &MessageContext,
+    msg: &crate::channel::IncomingMessage,
+) -> Result<String> {
+    // 入庫
+    handle_ingest(ctx, &msg.text).await?;
+
+    // 查詢 + 回覆
+    handle_query(ctx, &msg.text).await
 }
 
 const HEARTBEAT_TRIAGE_PROMPT: &str = "\

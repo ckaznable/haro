@@ -1,10 +1,13 @@
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use qdrant_client::Qdrant;
 use sqlx::PgPool;
-use tracing::info;
+use tokio::sync::mpsc;
+use tracing::{error, info};
 use uuid::Uuid;
 
 use crate::api::{self, EmbeddingProvider, GenerateResult, LlmProvider};
@@ -148,6 +151,207 @@ pub async fn retrieve(
 }
 
 // ── RRF 倒數排名融合 + 時間衰減 ──
+
+// ── 批次入庫（ingest 模式專用） ──
+
+/// 批次入庫佇列的發送端
+#[derive(Clone)]
+pub struct IngestQueue {
+    pg: Arc<PgPool>,
+    /// 通知背景任務有新項目（僅作信號，資料在 PG）
+    notify: mpsc::Sender<()>,
+}
+
+impl IngestQueue {
+    /// 將訊息寫入 PG pending_ingest 表後通知背景任務
+    pub async fn push(&self, agent_id: &str, text: &str, worker_model: &str) -> Result<()> {
+        db::postgres::insert_pending_ingest(&self.pg, agent_id, text, worker_model).await?;
+        // 通知背景任務（滿了也沒關係，背景任務會定期 poll PG）
+        let _ = self.notify.try_send(());
+        Ok(())
+    }
+}
+
+/// 批次入庫背景任務的設定
+pub struct BatchIngestConfig {
+    pub pg: Arc<PgPool>,
+    pub qdrant: Arc<Qdrant>,
+    pub embedder: Arc<crate::api::gemini::GeminiProvider>,
+    pub worker: Arc<crate::api::gemini::GeminiProvider>,
+    /// 累積多少筆後觸發批次處理
+    pub batch_size: usize,
+    /// 最長等待時間（超過後即使未滿 batch_size 也處理）
+    pub flush_interval: Duration,
+}
+
+/// 建立批次入庫佇列與背景任務，回傳 (佇列, JoinHandle)
+pub fn spawn_batch_ingest(
+    cfg: BatchIngestConfig,
+) -> (IngestQueue, tokio::task::JoinHandle<Result<()>>) {
+    let (tx, rx) = mpsc::channel::<()>(64);
+    let queue = IngestQueue {
+        pg: Arc::clone(&cfg.pg),
+        notify: tx,
+    };
+    let handle = tokio::spawn(batch_ingest_loop(rx, cfg));
+    (queue, handle)
+}
+
+/// 背景 polling 迴圈：收到信號或超時後從 PG 讀取 pending 項目批次處理
+async fn batch_ingest_loop(mut rx: mpsc::Receiver<()>, cfg: BatchIngestConfig) -> Result<()> {
+    // 啟動時先處理上次中斷遺留的 pending 項目
+    let remaining = db::postgres::fetch_pending_ingest(&cfg.pg, cfg.batch_size as i64).await?;
+    if !remaining.is_empty() {
+        info!(count = remaining.len(), "啟動時發現未處理的 pending 項目，開始處理");
+        process_pending_batch(remaining, &cfg).await;
+    }
+
+    loop {
+        // 等待通知或超時（定期 poll 以防通知遺失）
+        let _ = tokio::time::timeout(cfg.flush_interval, rx.recv()).await;
+
+        // 持續等待短暫時間收集更多項目
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(500);
+        loop {
+            match tokio::time::timeout_at(deadline, rx.recv()).await {
+                Ok(Some(())) => continue, // 消耗通知
+                _ => break,
+            }
+        }
+
+        // 從 PG 讀取 pending 項目
+        let items = match db::postgres::fetch_pending_ingest(&cfg.pg, cfg.batch_size as i64).await {
+            Ok(items) => items,
+            Err(e) => {
+                error!("讀取 pending_ingest 失敗: {e:#}");
+                continue;
+            }
+        };
+
+        if items.is_empty() {
+            continue;
+        }
+
+        process_pending_batch(items, &cfg).await;
+    }
+}
+
+/// 處理一個批次：並行蒸餾 → 批次 embedding → 寫入 PG + Qdrant → 刪除 pending
+async fn process_pending_batch(items: Vec<db::postgres::PendingIngestRow>, cfg: &BatchIngestConfig) {
+    let count = items.len();
+    let pending_ids: Vec<i64> = items.iter().map(|i| i.id).collect();
+    info!(count, "開始批次入庫處理");
+
+    // 1. 並行蒸餾（每個 item 獨立 LLM 呼叫）
+    let distill_futures: Vec<_> = items
+        .iter()
+        .map(|item| {
+            let worker = Arc::clone(&cfg.worker);
+            let text = item.text.clone();
+            async move { api::distill(worker.as_ref(), &text).await }
+        })
+        .collect();
+
+    let distill_results = futures::future::join_all(distill_futures).await;
+
+    // 收集成功蒸餾的項目
+    struct DistilledItem<'a> {
+        row: &'a db::postgres::PendingIngestRow,
+        data: crate::models::DistilledData,
+        usage: GenerateResult,
+    }
+    let mut distilled: Vec<DistilledItem> = Vec::new();
+
+    for (item, result) in items.iter().zip(distill_results) {
+        match result {
+            Ok(Some((data, usage))) => {
+                distilled.push(DistilledItem { row: item, data, usage });
+            }
+            Ok(None) => {
+                // 蒸餾失敗，僅存原始
+                if let Err(e) = db::postgres::insert_raw_message(&cfg.pg, &item.agent_id, &item.text, 0).await {
+                    error!(agent_id = %item.agent_id, "寫入原始訊息失敗: {e:#}");
+                }
+            }
+            Err(e) => {
+                error!(agent_id = %item.agent_id, "蒸餾失敗: {e:#}");
+                if let Err(e) = db::postgres::insert_raw_message(&cfg.pg, &item.agent_id, &item.text, 0).await {
+                    error!(agent_id = %item.agent_id, "寫入原始訊息失敗: {e:#}");
+                }
+            }
+        }
+    }
+
+    if !distilled.is_empty() {
+        // 2. 批次 embedding
+        let summaries: Vec<String> = distilled.iter().map(|d| d.data.dense_summary.clone()).collect();
+        let vectors = match cfg.embedder.batch_embed(&summaries).await {
+            Ok(v) => v,
+            Err(e) => {
+                error!("批次 embedding 失敗: {e:#}，逐筆 fallback");
+                let mut vecs = Vec::with_capacity(summaries.len());
+                for s in &summaries {
+                    match cfg.embedder.embed(s).await {
+                        Ok(v) => vecs.push(v),
+                        Err(e) => {
+                            error!("單筆 embedding 也失敗: {e:#}");
+                            vecs.push(vec![]);
+                        }
+                    }
+                }
+                vecs
+            }
+        };
+
+        // 3. 寫入 PG messages + Qdrant
+        for (d, vector) in distilled.iter().zip(vectors) {
+            if vector.is_empty() {
+                if let Err(e) = db::postgres::insert_message(&cfg.pg, &d.row.agent_id, &d.data, 0).await {
+                    error!(agent_id = %d.row.agent_id, "寫入 PG 失敗: {e:#}");
+                }
+                continue;
+            }
+
+            let inserted = match db::postgres::insert_message(&cfg.pg, &d.row.agent_id, &d.data, 0).await {
+                Ok(ins) => ins,
+                Err(e) => {
+                    error!(agent_id = %d.row.agent_id, "寫入 PG 失敗: {e:#}");
+                    continue;
+                }
+            };
+
+            if let Err(e) = db::qdrant::upsert_point(
+                &cfg.qdrant,
+                inserted.id,
+                vector,
+                &d.row.agent_id,
+                &d.data.original_text,
+                &d.data.keywords,
+                inserted.created_at.timestamp(),
+            )
+            .await
+            {
+                error!(agent_id = %d.row.agent_id, id = %inserted.id, "Qdrant upsert 失敗: {e:#}");
+            }
+
+            let _ = db::postgres::insert_token_usage(
+                &cfg.pg,
+                &d.row.agent_id,
+                &d.row.worker_model,
+                d.usage.input_tokens,
+                d.usage.output_tokens,
+            )
+            .await;
+        }
+    }
+
+    // 4. 刪除已處理的 pending 項目
+    if let Err(e) = db::postgres::delete_pending_ingest(&cfg.pg, &pending_ids).await {
+        error!("刪除 pending_ingest 失敗: {e:#}");
+    }
+
+    info!(count, "批次入庫完成");
+}
 
 fn rrf_fuse(
     vector_hits: &[SearchHit],

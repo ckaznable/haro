@@ -6,13 +6,15 @@ use anyhow::{Context, Result};
 use tracing::info;
 
 use crate::channel::{self, Channel};
-pub use config::{AgentConfig, ChannelConfig, LlmCmdDef};
+pub use config::{AgentConfig, AgentMode, ChannelConfig, LlmCmdDef};
 
 /// 一個 Agent 代表一組身份設定 + 頻道
 pub struct Agent {
     pub id: String,
     /// Agent 目錄路徑（用於讀寫 HEARTBEAT.md 等檔案）
     pub path: Option<std::path::PathBuf>,
+    /// 模式：Chat 或 Ingest
+    pub mode: AgentMode,
     pub prompt: String,
     /// 性格設定（來自 SOUL.md），空字串表示不啟用
     pub soul: String,
@@ -97,6 +99,7 @@ pub fn load_agents(agents_path: &str) -> Result<Vec<Agent>> {
 
         info!(
             agent_id = %id,
+            mode = ?agent_cfg.mode,
             channels = channels.len(),
             heartbeat = !heartbeat.is_empty(),
             brain_heartbeat = !brain_heartbeat.is_empty(),
@@ -106,6 +109,7 @@ pub fn load_agents(agents_path: &str) -> Result<Vec<Agent>> {
         agents.push(Agent {
             id,
             path: Some(path),
+            mode: agent_cfg.mode.clone(),
             prompt,
             soul,
             channels,

@@ -1,8 +1,22 @@
 use serde::Deserialize;
 
+/// Agent 運作模式
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentMode {
+    /// 收到訊息即回覆（預設）
+    #[default]
+    Chat,
+    /// 僅入庫，透過 /ask 查詢
+    Ingest,
+}
+
 /// Agent 層級設定（agents/<id>/config.toml）
 #[derive(Debug, Clone, Deserialize)]
 pub struct AgentConfig {
+    /// 模式：chat（預設）或 ingest（僅入庫）
+    #[serde(default)]
+    pub mode: AgentMode,
     #[serde(default)]
     pub channels: Vec<ChannelConfig>,
 }
