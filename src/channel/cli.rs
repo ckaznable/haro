@@ -67,10 +67,13 @@ impl Channel for CliChannel {
                 };
 
                 match handler(msg).await {
-                    Ok(reply) => {
+                    Ok(Some(reply)) => {
                         stdout.write_all(reply.as_bytes()).await?;
                         stdout.write_all(b"\n").await?;
                         stdout.flush().await?;
+                    }
+                    Ok(None) => {
+                        // 靜默處理，不輸出
                     }
                     Err(e) => {
                         let msg = format!("錯誤: {e:#}\n");

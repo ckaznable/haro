@@ -13,6 +13,12 @@ use anyhow::Result;
 pub struct ImageData {
     pub mime_type: String,
     pub data: Vec<u8>,
+    /// 平台專屬檔案識別（Telegram file_id）
+    pub file_id: Option<String>,
+    /// 來源 chat ID（Telegram chat_id）
+    pub source_chat_id: Option<i64>,
+    /// 來源訊息 ID（Telegram message_id）
+    pub source_message_id: Option<i32>,
 }
 
 /// 收到的訊息（跨平台共用）
@@ -38,8 +44,9 @@ pub enum ReplyHandle {
 }
 
 /// 訊息處理函式型別（object-safe）
+/// 回傳 `Some(text)` 表示回覆文字，`None` 表示靜默處理（Telegram 會改用 emoji reaction）
 pub type MessageHandler = Arc<
-    dyn Fn(IncomingMessage) -> Pin<Box<dyn Future<Output = Result<String>> + Send>>
+    dyn Fn(IncomingMessage) -> Pin<Box<dyn Future<Output = Result<Option<String>>> + Send>>
         + Send
         + Sync,
 >;

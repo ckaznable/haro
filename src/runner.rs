@@ -8,6 +8,7 @@ use crate::agent::{Agent, AgentMode};
 use crate::api::{self, LlmProvider};
 use crate::channel::{CommandRegistry, MessageHandler};
 use crate::config::AppConfig;
+use crate::db::postgres::ImageMeta;
 use crate::{db, search, tool};
 
 /// 共用資源，傳遞給各 agent 的 channel 和心跳任務
@@ -249,11 +250,13 @@ pub fn spawn_all(
                         AgentMode::Ingest => {
                             if let Some(q) = &queue {
                                 q.push(&ctx.agent_id, &msg.text, &ctx.worker_model).await?;
-                                Ok("✓".into())
                             } else {
                                 let images = to_image_inputs(&msg.images);
-                                handle_ingest(&ctx, &msg.text, &images).await
+                                let (file_ids, source_chat_id, source_message_id) = extract_image_meta(&msg.images);
+                                let image_meta = ImageMeta { file_ids: &file_ids, source_chat_id, source_message_id };
+                                handle_ingest(&ctx, &msg.text, &images, &image_meta).await?;
                             }
+                            Ok(None)
                         }
                     }
                 })
@@ -343,14 +346,23 @@ fn to_image_inputs(images: &[crate::channel::ImageData]) -> Vec<api::ImageInput>
         .collect()
 }
 
+/// 從 channel::ImageData 提取圖片來源 metadata
+fn extract_image_meta(images: &[crate::channel::ImageData]) -> (Vec<String>, Option<i64>, Option<i32>) {
+    let file_ids: Vec<String> = images.iter().filter_map(|img| img.file_id.clone()).collect();
+    // 取第一張圖片的來源資訊（同一則訊息的圖片來自同一個 chat/message）
+    let source_chat_id = images.first().and_then(|img| img.source_chat_id);
+    let source_message_id = images.first().and_then(|img| img.source_message_id);
+    (file_ids, source_chat_id, source_message_id)
+}
+
 /// 僅入庫（ingest 模式），不呼叫 LLM 回覆
-async fn handle_ingest(ctx: &MessageContext, text: &str, images: &[api::ImageInput]) -> Result<String> {
+async fn handle_ingest(ctx: &MessageContext, text: &str, images: &[api::ImageInput], image_meta: &ImageMeta<'_>) -> Result<()> {
     let (_, wk_usage) =
-        search::ingest(&ctx.pg, &ctx.qdrant, ctx.embedder.as_ref(), ctx.worker.as_ref(), &ctx.agent_id, text, images).await?;
+        search::ingest(&ctx.pg, &ctx.qdrant, ctx.embedder.as_ref(), ctx.worker.as_ref(), &ctx.agent_id, text, images, image_meta).await?;
 
     db::postgres::insert_token_usage(&ctx.pg, &ctx.agent_id, &ctx.worker_model, wk_usage.input_tokens, wk_usage.output_tokens).await?;
 
-    Ok("✓".into())
+    Ok(())
 }
 
 /// 查詢（不入庫）：檢索記憶 + LLM 回答
@@ -407,14 +419,16 @@ async fn handle_query(ctx: &MessageContext, question: &str, images: &[api::Image
 async fn handle_message(
     ctx: &MessageContext,
     msg: &crate::channel::IncomingMessage,
-) -> Result<String> {
+) -> Result<Option<String>> {
     let images = to_image_inputs(&msg.images);
+    let (file_ids, source_chat_id, source_message_id) = extract_image_meta(&msg.images);
+    let image_meta = ImageMeta { file_ids: &file_ids, source_chat_id, source_message_id };
 
     // 入庫
-    handle_ingest(ctx, &msg.text, &images).await?;
+    handle_ingest(ctx, &msg.text, &images, &image_meta).await?;
 
     // 查詢 + 回覆
-    handle_query(ctx, &msg.text, &images).await
+    handle_query(ctx, &msg.text, &images).await.map(Some)
 }
 
 const HEARTBEAT_TRIAGE_PROMPT: &str = "\

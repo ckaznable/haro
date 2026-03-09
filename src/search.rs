@@ -11,6 +11,7 @@ use tracing::{error, info};
 use uuid::Uuid;
 
 use crate::api::{self, EmbeddingProvider, GenerateResult, ImageInput, LlmProvider};
+use crate::db::postgres::ImageMeta;
 use crate::db;
 use crate::models::{RankedResult, SearchHit};
 
@@ -57,6 +58,7 @@ pub async fn ingest(
     bot_id: &str,
     text: &str,
     images: &[ImageInput],
+    image_meta: &ImageMeta<'_>,
 ) -> Result<(Uuid, GenerateResult)> {
     // 有圖片時一律入庫（跳過短訊息判斷）
     if images.is_empty() && text.chars().count() <= SHORT_MSG_CHARS {
@@ -101,7 +103,7 @@ pub async fn ingest(
     )?;
 
     // 3. 寫入 PostgreSQL（取得 PG 產生的 id + created_at）
-    let inserted = db::postgres::insert_message(pg, bot_id, &data, token_count).await?;
+    let inserted = db::postgres::insert_message(pg, bot_id, &data, token_count, image_meta).await?;
 
     // 4. 以相同 UUID + 時間戳寫入 Qdrant
     db::qdrant::upsert_point(
@@ -308,13 +310,13 @@ async fn process_pending_batch(items: Vec<db::postgres::PendingIngestRow>, cfg: 
         // 3. 寫入 PG messages + Qdrant
         for (d, vector) in distilled.iter().zip(vectors) {
             if vector.is_empty() {
-                if let Err(e) = db::postgres::insert_message(&cfg.pg, &d.row.agent_id, &d.data, 0).await {
+                if let Err(e) = db::postgres::insert_message(&cfg.pg, &d.row.agent_id, &d.data, 0, &ImageMeta { file_ids: &[], source_chat_id: None, source_message_id: None }).await {
                     error!(agent_id = %d.row.agent_id, "寫入 PG 失敗: {e:#}");
                 }
                 continue;
             }
 
-            let inserted = match db::postgres::insert_message(&cfg.pg, &d.row.agent_id, &d.data, 0).await {
+            let inserted = match db::postgres::insert_message(&cfg.pg, &d.row.agent_id, &d.data, 0, &ImageMeta { file_ids: &[], source_chat_id: None, source_message_id: None }).await {
                 Ok(ins) => ins,
                 Err(e) => {
                     error!(agent_id = %d.row.agent_id, "寫入 PG 失敗: {e:#}");

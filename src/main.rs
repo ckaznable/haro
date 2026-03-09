@@ -188,7 +188,7 @@ async fn run_cli(cfg: &config::AppConfig) -> Result<()> {
                     temperature: 0.7,
                 })
                 .await?;
-            Ok(result.text)
+            Ok(Some(result.text))
         })
     });
 

@@ -40,16 +40,24 @@ pub struct InsertedMessage {
     pub created_at: DateTime<Utc>,
 }
 
+/// 圖片來源 metadata
+pub struct ImageMeta<'a> {
+    pub file_ids: &'a [String],
+    pub source_chat_id: Option<i64>,
+    pub source_message_id: Option<i32>,
+}
+
 /// 將蒸餾後的資料寫入 messages 表
 pub async fn insert_message(
     pool: &PgPool,
     bot_id: &str,
     data: &DistilledData,
     token_count: i32,
+    image_meta: &ImageMeta<'_>,
 ) -> Result<InsertedMessage> {
     let row = sqlx::query_as::<_, InsertedRow>(
-        "INSERT INTO messages (bot_id, dense_summary, keywords, original_text, token_count) \
-         VALUES ($1, $2, $3, $4, $5) \
+        "INSERT INTO messages (bot_id, dense_summary, keywords, original_text, token_count, image_file_ids, source_chat_id, source_message_id) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
          RETURNING id, created_at",
     )
     .bind(bot_id)
@@ -57,6 +65,9 @@ pub async fn insert_message(
     .bind(&data.keywords)
     .bind(&data.original_text)
     .bind(token_count)
+    .bind(image_meta.file_ids)
+    .bind(image_meta.source_chat_id)
+    .bind(image_meta.source_message_id)
     .fetch_one(pool)
     .await
     .context("插入訊息失敗")?;

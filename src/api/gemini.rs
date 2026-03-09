@@ -8,6 +8,8 @@ use super::{EmbeddingProvider, GenerateParams, GenerateResult, ImageInput, LlmPr
 use crate::tool::ToolRegistry;
 
 const BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta/models";
+const FILES_UPLOAD_URL: &str = "https://generativelanguage.googleapis.com/upload/v1beta/files";
+const FILES_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
 
 /// Gemini API Provider（每個實例對應一個 model）
 pub struct GeminiProvider {
@@ -21,7 +23,7 @@ pub struct GeminiProvider {
 
 // ── 共用 Part 型別（支援文字 + 圖片） ──
 
-/// 多模態 Part：text 或 inline_data
+/// 多模態 Part：text / inline_data / file_data
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ContentPart {
@@ -29,6 +31,8 @@ struct ContentPart {
     text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     inline_data: Option<InlineData>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file_data: Option<FileData>,
 }
 
 #[derive(Serialize)]
@@ -38,9 +42,16 @@ struct InlineData {
     data: String, // base64
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FileData {
+    file_uri: String,
+    mime_type: String,
+}
+
 impl ContentPart {
     fn text(s: impl Into<String>) -> Self {
-        Self { text: Some(s.into()), inline_data: None }
+        Self { text: Some(s.into()), inline_data: None, file_data: None }
     }
 
     fn image(mime_type: &str, bytes: &[u8]) -> Self {
@@ -50,11 +61,23 @@ impl ContentPart {
                 mime_type: mime_type.to_owned(),
                 data: base64::engine::general_purpose::STANDARD.encode(bytes),
             }),
+            file_data: None,
+        }
+    }
+
+    fn file(uri: &str, mime_type: &str) -> Self {
+        Self {
+            text: None,
+            inline_data: None,
+            file_data: Some(FileData {
+                file_uri: uri.to_owned(),
+                mime_type: mime_type.to_owned(),
+            }),
         }
     }
 }
 
-/// 從 ImageInput 列表建構 ContentPart 列表（text + images）
+/// 從 ImageInput 列表建構 ContentPart 列表（text + inline_data，用於 generate）
 fn build_multimodal_parts(text: &str, images: &[ImageInput]) -> Vec<ContentPart> {
     let mut parts = Vec::with_capacity(1 + images.len());
     if !text.is_empty() {
@@ -68,6 +91,43 @@ fn build_multimodal_parts(text: &str, images: &[ImageInput]) -> Vec<ContentPart>
         parts.push(ContentPart::text(""));
     }
     parts
+}
+
+/// 從已上傳的檔案建構 ContentPart 列表（text + file_data，用於 embed）
+fn build_file_parts(text: &str, files: &[UploadedFile]) -> Vec<ContentPart> {
+    let mut parts = Vec::with_capacity(1 + files.len());
+    if !text.is_empty() {
+        parts.push(ContentPart::text(text));
+    }
+    for f in files {
+        parts.push(ContentPart::file(&f.uri, &f.mime_type));
+    }
+    if parts.is_empty() {
+        parts.push(ContentPart::text(""));
+    }
+    parts
+}
+
+// ── File API 型別 ──
+
+/// 上傳至 Gemini File API 的檔案資訊
+struct UploadedFile {
+    name: String,
+    uri: String,
+    mime_type: String,
+}
+
+#[derive(Deserialize)]
+struct FileUploadResponse {
+    file: FileInfo,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FileInfo {
+    name: String,
+    uri: String,
+    mime_type: String,
 }
 
 // ── Embedding API 型別 ──
@@ -328,6 +388,59 @@ impl GeminiProvider {
             None
         }
     }
+
+    /// 上傳檔案到 Gemini File API
+    async fn upload_file(&self, mime_type: &str, data: &[u8]) -> Result<UploadedFile> {
+        let url = format!("{}?key={}", FILES_UPLOAD_URL, self.api_key);
+
+        let resp = self
+            .http
+            .post(&url)
+            .header("X-Goog-Upload-Protocol", "raw")
+            .header("Content-Type", mime_type)
+            .body(data.to_vec())
+            .send()
+            .await
+            .context("File API 上傳失敗")?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("File API 上傳錯誤 {status}: {body}");
+        }
+
+        let result: FileUploadResponse = resp.json().await.context("解析 File API 回應失敗")?;
+        Ok(UploadedFile {
+            name: result.file.name,
+            uri: result.file.uri,
+            mime_type: result.file.mime_type,
+        })
+    }
+
+    /// 刪除已上傳的檔案
+    async fn delete_file(&self, name: &str) {
+        let url = format!("{}/{}?key={}", FILES_BASE_URL, name, self.api_key);
+        let _ = self.http.delete(&url).send().await;
+    }
+
+    /// 上傳多張圖片，回傳已上傳的檔案列表
+    async fn upload_images(&self, images: &[ImageInput]) -> Vec<UploadedFile> {
+        let mut files = Vec::with_capacity(images.len());
+        for img in images {
+            match self.upload_file(&img.mime_type, &img.data).await {
+                Ok(f) => files.push(f),
+                Err(e) => tracing::warn!("圖片上傳失敗，跳過: {e:#}"),
+            }
+        }
+        files
+    }
+
+    /// 清理已上傳的檔案
+    async fn cleanup_files(&self, files: Vec<UploadedFile>) {
+        for f in &files {
+            self.delete_file(&f.name).await;
+        }
+    }
 }
 
 impl EmbeddingProvider for GeminiProvider {
@@ -336,15 +449,26 @@ impl EmbeddingProvider for GeminiProvider {
     }
 
     async fn embed_multimodal(&self, text: &str, images: &[ImageInput]) -> Result<Vec<f32>> {
+        // 有圖片時使用 File API 上傳，用 file_data 引用
+        let uploaded = if !images.is_empty() {
+            self.upload_images(images).await
+        } else {
+            vec![]
+        };
+
+        let parts = if uploaded.is_empty() {
+            build_multimodal_parts(text, &[])
+        } else {
+            build_file_parts(text, &uploaded)
+        };
+
         let url = format!(
             "{}/{}:embedContent?key={}",
             BASE_URL, self.model, self.api_key
         );
 
         let body = EmbedRequest {
-            content: EmbedContent {
-                parts: build_multimodal_parts(text, images),
-            },
+            content: EmbedContent { parts },
             output_dimensionality: self.dimension,
         };
 
@@ -356,13 +480,17 @@ impl EmbeddingProvider for GeminiProvider {
             .await
             .context("Embedding API 請求失敗")?;
 
+        // 無論成功失敗都清理上傳的檔案
+        let cleanup = !uploaded.is_empty();
         if !resp.status().is_success() {
             let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("Embedding API 錯誤 {status}: {body}");
+            let body_text = resp.text().await.unwrap_or_default();
+            if cleanup { self.cleanup_files(uploaded).await; }
+            anyhow::bail!("Embedding API 錯誤 {status}: {body_text}");
         }
 
         let result: EmbedResponse = resp.json().await.context("解析 Embedding 回應失敗")?;
+        if cleanup { self.cleanup_files(uploaded).await; }
         Ok(result.embedding.values)
     }
 

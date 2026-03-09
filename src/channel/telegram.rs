@@ -4,7 +4,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use teloxide::net::Download;
 use teloxide::prelude::*;
-use teloxide::types::{ChatAction, ParseMode};
+use teloxide::types::{ChatAction, ParseMode, ReactionType};
 use tracing::{error, info, warn};
 
 use super::{Channel, CommandRegistry, ImageData, IncomingMessage, MessageHandler, ReplyHandle};
@@ -98,6 +98,9 @@ async fn download_photo(bot: &Bot, msg: &Message) -> Option<ImageData> {
     Some(ImageData {
         mime_type: mime.to_owned(),
         data: buf,
+        file_id: Some(largest.file.id.to_string()),
+        source_chat_id: Some(msg.chat.id.0),
+        source_message_id: Some(msg.id.0),
     })
 }
 
@@ -208,8 +211,17 @@ impl Channel for TelegramChannel {
                             typing_handle.abort();
 
                             match result {
-                                Ok(reply) => {
+                                Ok(Some(reply)) => {
                                     send_reply(&bot, msg.chat.id, &reply).await;
+                                }
+                                Ok(None) => {
+                                    // 靜默處理：用 emoji 表情回應
+                                    let _ = bot
+                                        .set_message_reaction(msg.chat.id, msg.id)
+                                        .reaction(vec![ReactionType::Emoji {
+                                            emoji: "👀".to_owned(),
+                                        }])
+                                        .await;
                                 }
                                 Err(e) => {
                                     error!("處理訊息失敗: {e:#}");
