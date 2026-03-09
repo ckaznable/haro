@@ -93,7 +93,7 @@ impl Channel for TelegramChannel {
                                 let ok = allowed.contains(&uid)
                                     || uname
                                         .as_ref()
-                                        .map_or(false, |n| allowed.contains(n));
+                                        .is_some_and(|n| allowed.contains(n));
 
                                 if !ok {
                                     warn!(uid, ?uname, "未授權的使用者，忽略訊息");
@@ -108,19 +108,19 @@ impl Channel for TelegramChannel {
                                 .unwrap_or_default();
 
                             // 檢查是否為已註冊的指令
-                            if let Some((cmd, args)) = parse_command(&text) {
-                                if let Some(cmd_handler) = commands.resolve(cmd) {
-                                    let result = cmd_handler(sender_id, args.to_owned()).await;
-                                    match result {
-                                        Ok(reply) => send_reply(&bot, msg.chat.id, &reply).await,
-                                        Err(e) => {
-                                            let _ = bot
-                                                .send_message(msg.chat.id, format!("指令失敗: {e:#}"))
-                                                .await;
-                                        }
+                            if let Some((cmd, args)) = parse_command(&text)
+                                && let Some(cmd_handler) = commands.resolve(cmd)
+                            {
+                                let result = cmd_handler(sender_id, args.to_owned()).await;
+                                match result {
+                                    Ok(reply) => send_reply(&bot, msg.chat.id, &reply).await,
+                                    Err(e) => {
+                                        let _ = bot
+                                            .send_message(msg.chat.id, format!("指令失敗: {e:#}"))
+                                            .await;
                                     }
-                                    return respond(());
                                 }
+                                return respond(());
                             }
 
                             // 持續發送「輸入中…」狀態直到處理完成

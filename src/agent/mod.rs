@@ -119,18 +119,18 @@ pub fn load_agents(agents_path: &str) -> Result<Vec<Agent>> {
 }
 
 fn resolve_bot_token(cfg: &ChannelConfig) -> Result<String> {
-    if let Some(env_name) = &cfg.bot_token_env {
-        if let Ok(v) = std::env::var(env_name) {
-            let v = v.trim().to_owned();
-            if !v.is_empty() {
-                return Ok(v);
-            }
+    if let Some(env_name) = &cfg.bot_token_env
+        && let Ok(v) = std::env::var(env_name)
+    {
+        let v = v.trim().to_owned();
+        if !v.is_empty() {
+            return Ok(v);
         }
     }
-    if let Some(token) = &cfg.bot_token {
-        if !token.is_empty() {
-            return Ok(token.clone());
-        }
+    if let Some(token) = &cfg.bot_token
+        && !token.is_empty()
+    {
+        return Ok(token.clone());
     }
     anyhow::bail!("需要設定 bot_token 或 bot_token_env")
 }

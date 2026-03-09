@@ -37,8 +37,7 @@ impl Channel for CliChannel {
                 }
 
                 // 檢查是否為已註冊的指令
-                if text.starts_with('/') {
-                    let without_slash = &text[1..];
+                if let Some(without_slash) = text.strip_prefix('/') {
                     let (cmd, args) = without_slash
                         .split_once(char::is_whitespace)
                         .unwrap_or((without_slash, ""));
