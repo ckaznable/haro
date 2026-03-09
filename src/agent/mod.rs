@@ -6,13 +6,23 @@ use anyhow::{Context, Result};
 use tracing::info;
 
 use crate::channel::{self, Channel};
-pub use config::{AgentConfig, ChannelConfig};
+pub use config::{AgentConfig, ChannelConfig, LlmCmdDef};
 
 /// 一個 Agent 代表一組身份設定 + 頻道
 pub struct Agent {
     pub id: String,
+    /// Agent 目錄路徑（用於讀寫 HEARTBEAT.md 等檔案）
+    pub path: Option<std::path::PathBuf>,
     pub prompt: String,
+    /// 性格設定（來自 SOUL.md），空字串表示不啟用
+    pub soul: String,
     pub channels: Vec<Box<dyn Channel>>,
+    /// 心跳提示詞（來自 HEARTBEAT.md），空字串表示不啟用心跳
+    pub heartbeat: String,
+    /// 大腦心跳提示詞（來自 BRAIN_HEARTBEAT.md），空字串表示不啟用
+    pub brain_heartbeat: String,
+    /// LLM 互動指令（來自 cmd.toml）
+    pub llm_commands: Vec<LlmCmdDef>,
 }
 
 /// 掃描 agents_path 下所有子目錄，每個子目錄就是一個 agent
@@ -59,10 +69,50 @@ pub fn load_agents(agents_path: &str) -> Result<Vec<Agent>> {
         .with_context(|| format!("解析 {} 失敗", config_path.display()))?;
 
         let prompt = std::fs::read_to_string(&prompt_path).unwrap_or_default();
+        let soul = std::fs::read_to_string(path.join("SOUL.md"))
+            .unwrap_or_default()
+            .trim()
+            .to_owned();
+        let heartbeat = std::fs::read_to_string(path.join("HEARTBEAT.md"))
+            .unwrap_or_default()
+            .trim()
+            .to_owned();
+        let brain_heartbeat = std::fs::read_to_string(path.join("BRAIN_HEARTBEAT.md"))
+            .unwrap_or_default()
+            .trim()
+            .to_owned();
         let channels = build_channels(&agent_cfg.channels)?;
 
-        info!(agent_id = %id, channels = channels.len(), "載入 agent");
-        agents.push(Agent { id, prompt, channels });
+        let cmd_path = path.join("cmd.toml");
+        let llm_commands = if cmd_path.exists() {
+            let cmd_cfg: config::CmdConfig = toml::from_str(
+                &std::fs::read_to_string(&cmd_path)
+                    .with_context(|| format!("無法讀取 {}", cmd_path.display()))?,
+            )
+            .with_context(|| format!("解析 {} 失敗", cmd_path.display()))?;
+            cmd_cfg.commands
+        } else {
+            Vec::new()
+        };
+
+        info!(
+            agent_id = %id,
+            channels = channels.len(),
+            heartbeat = !heartbeat.is_empty(),
+            brain_heartbeat = !brain_heartbeat.is_empty(),
+            llm_commands = llm_commands.len(),
+            "載入 agent"
+        );
+        agents.push(Agent {
+            id,
+            path: Some(path),
+            prompt,
+            soul,
+            channels,
+            heartbeat,
+            brain_heartbeat,
+            llm_commands,
+        });
     }
 
     Ok(agents)

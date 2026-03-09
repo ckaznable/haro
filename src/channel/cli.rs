@@ -1,7 +1,9 @@
+use std::sync::Arc;
+
 use anyhow::Result;
 use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt};
 
-use super::{Channel, IncomingMessage, MessageHandler, ReplyHandle};
+use super::{Channel, CommandRegistry, IncomingMessage, MessageHandler, ReplyHandle};
 
 /// CLI 互動式頻道，用於測試 LLM 設定
 pub struct CliChannel;
@@ -10,6 +12,7 @@ impl Channel for CliChannel {
     fn start(
         self: Box<Self>,
         handler: MessageHandler,
+        commands: Arc<CommandRegistry>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>> {
         Box::pin(async move {
             let mut stdout = io::stdout();
@@ -31,6 +34,29 @@ impl Channel for CliChannel {
                 }
                 if text == "/quit" || text == "/exit" {
                     break;
+                }
+
+                // 檢查是否為已註冊的指令
+                if text.starts_with('/') {
+                    let without_slash = &text[1..];
+                    let (cmd, args) = without_slash
+                        .split_once(char::is_whitespace)
+                        .unwrap_or((without_slash, ""));
+
+                    if let Some(cmd_handler) = commands.resolve(cmd) {
+                        match cmd_handler("cli".into(), args.trim().to_owned()).await {
+                            Ok(reply) => {
+                                stdout.write_all(reply.as_bytes()).await?;
+                                stdout.write_all(b"\n").await?;
+                            }
+                            Err(e) => {
+                                let msg = format!("指令失敗: {e:#}\n");
+                                stdout.write_all(msg.as_bytes()).await?;
+                            }
+                        }
+                        stdout.flush().await?;
+                        continue;
+                    }
                 }
 
                 let msg = IncomingMessage {

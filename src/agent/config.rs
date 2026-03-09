@@ -7,6 +7,27 @@ pub struct AgentConfig {
     pub channels: Vec<ChannelConfig>,
 }
 
+/// LLM 互動指令設定（agents/<id>/cmd.toml）
+#[derive(Debug, Clone, Deserialize)]
+pub struct CmdConfig {
+    #[serde(default)]
+    pub commands: Vec<LlmCmdDef>,
+}
+
+/// 單一 LLM 指令定義
+#[derive(Debug, Clone, Deserialize)]
+pub struct LlmCmdDef {
+    /// 指令名稱（不含 `/`）
+    pub name: String,
+    /// 指令說明
+    pub description: String,
+    /// 注入給 LLM 的提示詞
+    pub prompt: String,
+    /// 可使用的工具名稱列表（如 ["fetch", "save_memo"]），空 = 不使用工具
+    #[serde(default)]
+    pub tools: Vec<String>,
+}
+
 /// 單一頻道設定
 #[derive(Debug, Clone, Deserialize)]
 pub struct ChannelConfig {

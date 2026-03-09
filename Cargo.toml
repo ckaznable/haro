@@ -42,6 +42,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "2"
 anyhow = "1"
+clap = { version = "4", features = ["derive"] }
 telegram-markdown-v2 = "0.2"
 
 [profile.release]

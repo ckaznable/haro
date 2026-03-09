@@ -6,7 +6,7 @@ use teloxide::prelude::*;
 use teloxide::types::{ChatAction, ParseMode};
 use tracing::{error, info, warn};
 
-use super::{Channel, IncomingMessage, MessageHandler, ReplyHandle};
+use super::{Channel, CommandRegistry, IncomingMessage, MessageHandler, ReplyHandle};
 
 /// Telegram Bot 頻道實作
 pub struct TelegramChannel {
@@ -43,10 +43,28 @@ async fn send_reply(bot: &Bot, chat_id: ChatId, text: &str) {
     }
 }
 
+/// 從 Telegram 訊息文字解析 slash command，回傳 (cmd_name, args)
+/// 例: "/heartbeat show" → Some(("heartbeat", "show"))
+/// 例: "/status" → Some(("status", ""))
+fn parse_command(text: &str) -> Option<(&str, &str)> {
+    let text = text.trim();
+    if !text.starts_with('/') {
+        return None;
+    }
+    let without_slash = &text[1..];
+    // 去掉 @bot_username 後綴（如 /cmd@botname args）
+    let (cmd_part, args) = without_slash
+        .split_once(char::is_whitespace)
+        .unwrap_or((without_slash, ""));
+    let cmd = cmd_part.split('@').next().unwrap_or(cmd_part);
+    Some((cmd, args.trim()))
+}
+
 impl Channel for TelegramChannel {
     fn start(
         self: Box<Self>,
         handler: MessageHandler,
+        commands: Arc<CommandRegistry>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>> {
         Box::pin(async move {
             let bot = self.bot;
@@ -61,6 +79,7 @@ impl Channel for TelegramChannel {
                     .endpoint(move |bot: Bot, msg: Message, text: String| {
                         let handler = Arc::clone(&handler);
                         let allowed = Arc::clone(&allowed_users);
+                        let commands = Arc::clone(&commands);
                         async move {
                             // 檢查允許名單
                             if !allowed.is_empty() {
@@ -82,6 +101,28 @@ impl Channel for TelegramChannel {
                                 }
                             }
 
+                            let sender_id = msg
+                                .from
+                                .as_ref()
+                                .map(|u| u.id.0.to_string())
+                                .unwrap_or_default();
+
+                            // 檢查是否為已註冊的指令
+                            if let Some((cmd, args)) = parse_command(&text) {
+                                if let Some(cmd_handler) = commands.resolve(cmd) {
+                                    let result = cmd_handler(sender_id, args.to_owned()).await;
+                                    match result {
+                                        Ok(reply) => send_reply(&bot, msg.chat.id, &reply).await,
+                                        Err(e) => {
+                                            let _ = bot
+                                                .send_message(msg.chat.id, format!("指令失敗: {e:#}"))
+                                                .await;
+                                        }
+                                    }
+                                    return respond(());
+                                }
+                            }
+
                             // 持續發送「輸入中…」狀態直到處理完成
                             let typing_bot = bot.clone();
                             let typing_chat_id = msg.chat.id;
@@ -96,11 +137,7 @@ impl Channel for TelegramChannel {
 
                             let incoming = IncomingMessage {
                                 bot_id: String::new(),
-                                sender_id: msg
-                                    .from
-                                    .as_ref()
-                                    .map(|u| u.id.0.to_string())
-                                    .unwrap_or_default(),
+                                sender_id,
                                 text,
                                 reply_handle: ReplyHandle::Telegram {
                                     chat_id: msg.chat.id.0,

@@ -1,0 +1,23 @@
+# LLM 互動指令設定
+# 每個 [[commands]] 定義一個 slash command，觸發時將 prompt 送給 LLM 執行
+# 使用者可在指令後附加文字作為補充，例如 /translate 你好世界
+
+[[commands]]
+name = "summary"
+description = "總結近期對話並存入備忘錄"
+prompt = "請總結我們最近的對話重點，列出關鍵資訊和待辦事項，並用 save_memo 儲存。"
+tools = ["save_memo", "read_memo"]
+
+[[commands]]
+name = "translate"
+description = "翻譯文字"
+prompt = "請將以下內容翻譯成英文："
+
+[[commands]]
+name = "research"
+description = "查詢網路資料"
+prompt = "請查詢以下主題的最新資訊並整理重點："
+tools = ["fetch"]
+
+# 可用工具：save_memo, read_memo, fetch
+# tools 留空或不寫 = 純 LLM 生成，不使用工具

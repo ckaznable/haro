@@ -1,3 +1,4 @@
+pub mod fetch;
 pub mod scratchpad;
 
 use std::future::Future;
@@ -19,6 +20,40 @@ pub trait Tool: Send + Sync {
         &self,
         args: serde_json::Value,
     ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + '_>>;
+}
+
+/// 依工具名稱建立工具實例
+/// 需要 PgPool + bot_id 的工具（scratchpad）會使用傳入的參數
+pub fn build_tool_by_name(
+    name: &str,
+    pg: &std::sync::Arc<sqlx::PgPool>,
+    bot_id: &str,
+) -> Option<Box<dyn Tool>> {
+    match name {
+        "save_memo" | "read_memo" => {
+            // scratchpad::tools 回傳兩個，依名稱篩選
+            scratchpad::tools(std::sync::Arc::clone(pg), bot_id.to_owned())
+                .into_iter()
+                .find(|t| t.definition().name == name)
+        }
+        "fetch" => Some(fetch::tool()),
+        _ => None,
+    }
+}
+
+/// 依工具名稱列表建立 ToolRegistry
+pub fn build_registry(
+    names: &[String],
+    pg: &std::sync::Arc<sqlx::PgPool>,
+    bot_id: &str,
+) -> ToolRegistry {
+    let mut registry = ToolRegistry::new();
+    for name in names {
+        if let Some(tool) = build_tool_by_name(name, pg, bot_id) {
+            registry.register(tool);
+        }
+    }
+    registry
 }
 
 /// 工具註冊表，管理所有可用工具

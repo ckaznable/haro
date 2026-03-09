@@ -18,6 +18,15 @@ pub struct AppConfig {
     pub embedding: ProviderConfig,
     pub llm: ProviderConfig,
     pub worker: ProviderConfig,
+    /// 大腦模型（處理複雜任務），未設定則使用 llm
+    pub brain: Option<ProviderConfig>,
+    /// 心跳間隔（秒），預設 3600
+    #[serde(default = "default_heartbeat_interval")]
+    pub heartbeat_interval: u64,
+}
+
+fn default_heartbeat_interval() -> u64 {
+    3600
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -107,6 +116,9 @@ impl AppConfig {
         cfg.embedding.resolve_api_key_env("embedding")?;
         cfg.llm.resolve_api_key_env("llm")?;
         cfg.worker.resolve_api_key_env("worker")?;
+        if let Some(brain) = &mut cfg.brain {
+            brain.resolve_api_key_env("brain")?;
+        }
 
         cfg.validate()?;
         Ok(cfg)
