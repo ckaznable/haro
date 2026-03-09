@@ -7,12 +7,25 @@ use crate::tool::ToolRegistry;
 
 // ── Provider 抽象層 ──
 
+/// 圖片輸入（跨 provider 共用）
+pub struct ImageInput {
+    pub mime_type: String,
+    pub data: Vec<u8>,
+}
+
 /// Embedding 服務提供者抽象（可獨立於 LLM 替換，例如本地模型 / Cohere / Voyage）
 pub trait EmbeddingProvider: Send + Sync {
     /// 文本 → 向量
     fn embed(
         &self,
         text: &str,
+    ) -> impl std::future::Future<Output = Result<Vec<f32>>> + Send;
+
+    /// 多模態 → 向量（文字 + 圖片）
+    fn embed_multimodal(
+        &self,
+        text: &str,
+        images: &[ImageInput],
     ) -> impl std::future::Future<Output = Result<Vec<f32>>> + Send;
 
     /// 批次文本 → 批次向量（provider 可實作原生 batch API）
@@ -26,6 +39,8 @@ pub trait EmbeddingProvider: Send + Sync {
 pub struct GenerateParams<'a> {
     pub system: Option<&'a str>,
     pub user_message: &'a str,
+    /// 附帶的圖片
+    pub images: &'a [ImageInput],
     pub json_mode: bool,
     pub temperature: f32,
 }
@@ -45,7 +60,7 @@ pub trait LlmProvider: Send + Sync {
         text: &str,
     ) -> impl std::future::Future<Output = Result<i32>> + Send;
 
-    /// 通用文本生成
+    /// 通用文本生成（支援多模態輸入）
     fn generate(
         &self,
         params: GenerateParams<'_>,
@@ -61,7 +76,7 @@ pub trait LlmProvider: Send + Sync {
 
 // ── 基於 LlmProvider 的上層便利函式 ──
 
-const DISTILL_PROMPT: &str = "\
+const DISTILL_TEXT_PROMPT: &str = "\
 Summarize the following text into JSON for a RAG vector database.
 
 Output format (strict JSON, no markdown fences):
@@ -74,19 +89,48 @@ Retain ONLY core technical entities, causal relationships, and factual claims.
 If a term has a well-known Chinese translation, include BOTH forms (e.g. \"Ring Buffer\", \"環狀緩衝區\").
 3. `original_text`: The user's input text, reproduced verbatim with zero modifications.";
 
-/// 資料蒸餾：將原始文本轉換為結構化數據，回傳 (蒸餾結果, token 用量)
+const DISTILL_IMAGE_PROMPT: &str = "\
+Analyze the provided image(s) and any accompanying text, then produce a JSON summary for a RAG vector database.
+
+Output format (strict JSON, no markdown fences):
+{\"dense_summary\": \"...\", \"keywords\": [\"...\"], \"original_text\": \"...\"}
+
+Rules:
+1. `dense_summary`: Describe what is in the image concisely. Include visible text (OCR), objects, diagrams, \
+code snippets, charts, or any identifiable content. If there is accompanying text, integrate it.
+2. `keywords`: Extract proper nouns, technical terms, visible labels, brand names, and domain-specific terms (3-10 items). \
+If a term has a well-known Chinese translation, include BOTH forms.
+3. `original_text`: If the user provided text alongside the image, reproduce it verbatim. \
+If there was no text, provide a brief one-line description of the image content.";
+
+/// 資料蒸餾：將原始文本（可選圖片）轉換為結構化數據，回傳 (蒸餾結果, token 用量)
 /// JSON 解析失敗時最多重試 3 次，全部失敗回傳 None
 pub async fn distill(
     llm: &impl LlmProvider,
     text: &str,
+    images: &[ImageInput],
 ) -> Result<Option<(DistilledData, GenerateResult)>> {
     const MAX_RETRIES: usize = 3;
+
+    let prompt = if images.is_empty() {
+        DISTILL_TEXT_PROMPT
+    } else {
+        DISTILL_IMAGE_PROMPT
+    };
+
+    // 圖片訊息如果沒有文字，用佔位符
+    let user_message = if text.is_empty() && !images.is_empty() {
+        "[圖片]"
+    } else {
+        text
+    };
 
     for i in 0..MAX_RETRIES {
         let result = llm
             .generate(GenerateParams {
-                system: Some(DISTILL_PROMPT),
-                user_message: text,
+                system: Some(prompt),
+                user_message,
+                images,
                 json_mode: true,
                 temperature: 0.1,
             })
@@ -113,6 +157,7 @@ pub async fn chat(
     llm.generate(GenerateParams {
         system: Some(system),
         user_message: user_query,
+        images: &[],
         json_mode: false,
         temperature: 0.7,
     })
@@ -130,6 +175,28 @@ pub async fn chat_with_tools(
         GenerateParams {
             system: Some(system),
             user_message: user_query,
+            images: &[],
+            json_mode: false,
+            temperature: 0.7,
+        },
+        tools,
+    )
+    .await
+}
+
+/// 帶圖片的對話回答（含工具）
+pub async fn chat_with_images(
+    llm: &impl LlmProvider,
+    system: &str,
+    user_query: &str,
+    images: &[ImageInput],
+    tools: &ToolRegistry,
+) -> Result<GenerateResult> {
+    llm.generate_with_tools(
+        GenerateParams {
+            system: Some(system),
+            user_message: user_query,
+            images,
             json_mode: false,
             temperature: 0.7,
         },

@@ -2,7 +2,9 @@ use anyhow::{Context, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
-use super::{EmbeddingProvider, GenerateParams, GenerateResult, LlmProvider};
+use base64::Engine;
+
+use super::{EmbeddingProvider, GenerateParams, GenerateResult, ImageInput, LlmProvider};
 use crate::tool::ToolRegistry;
 
 const BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta/models";
@@ -17,24 +19,70 @@ pub struct GeminiProvider {
     thinking_level: Option<String>,
 }
 
+// ── 共用 Part 型別（支援文字 + 圖片） ──
+
+/// 多模態 Part：text 或 inline_data
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ContentPart {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    inline_data: Option<InlineData>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InlineData {
+    mime_type: String,
+    data: String, // base64
+}
+
+impl ContentPart {
+    fn text(s: impl Into<String>) -> Self {
+        Self { text: Some(s.into()), inline_data: None }
+    }
+
+    fn image(mime_type: &str, bytes: &[u8]) -> Self {
+        Self {
+            text: None,
+            inline_data: Some(InlineData {
+                mime_type: mime_type.to_owned(),
+                data: base64::engine::general_purpose::STANDARD.encode(bytes),
+            }),
+        }
+    }
+}
+
+/// 從 ImageInput 列表建構 ContentPart 列表（text + images）
+fn build_multimodal_parts(text: &str, images: &[ImageInput]) -> Vec<ContentPart> {
+    let mut parts = Vec::with_capacity(1 + images.len());
+    if !text.is_empty() {
+        parts.push(ContentPart::text(text));
+    }
+    for img in images {
+        parts.push(ContentPart::image(&img.mime_type, &img.data));
+    }
+    // 至少要有一個 part
+    if parts.is_empty() {
+        parts.push(ContentPart::text(""));
+    }
+    parts
+}
+
 // ── Embedding API 型別 ──
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct EmbedRequest<'a> {
-    content: EmbedContent<'a>,
+struct EmbedRequest {
+    content: EmbedContent,
     #[serde(skip_serializing_if = "Option::is_none")]
     output_dimensionality: Option<u64>,
 }
 
 #[derive(Serialize)]
-struct EmbedContent<'a> {
-    parts: [TextPart<'a>; 1],
-}
-
-#[derive(Serialize)]
-struct TextPart<'a> {
-    text: &'a str,
+struct EmbedContent {
+    parts: Vec<ContentPart>,
 }
 
 #[derive(Deserialize)]
@@ -57,17 +105,7 @@ struct BatchEmbedRequest {
 #[derive(Serialize)]
 struct BatchEmbedItem {
     model: String,
-    content: BatchEmbedContent,
-}
-
-#[derive(Serialize)]
-struct BatchEmbedContent {
-    parts: [BatchTextPart; 1],
-}
-
-#[derive(Serialize)]
-struct BatchTextPart {
-    text: String,
+    content: EmbedContent,
 }
 
 #[derive(Deserialize)]
@@ -79,22 +117,22 @@ struct BatchEmbedResponse {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct GenerateRequest<'a> {
-    contents: [Message<'a>; 1],
+struct GenerateRequest {
+    contents: [MultimodalMessage; 1],
     #[serde(skip_serializing_if = "Option::is_none")]
-    system_instruction: Option<Instruction<'a>>,
+    system_instruction: Option<SystemInstruction>,
     generation_config: GenConfig,
 }
 
 #[derive(Serialize)]
-struct Message<'a> {
+struct MultimodalMessage {
     role: &'static str,
-    parts: [TextPart<'a>; 1],
+    parts: Vec<ContentPart>,
 }
 
 #[derive(Serialize)]
-struct Instruction<'a> {
-    parts: [TextPart<'a>; 1],
+struct SystemInstruction {
+    parts: Vec<ContentPart>,
 }
 
 #[derive(Serialize)]
@@ -294,6 +332,10 @@ impl GeminiProvider {
 
 impl EmbeddingProvider for GeminiProvider {
     async fn embed(&self, text: &str) -> Result<Vec<f32>> {
+        self.embed_multimodal(text, &[]).await
+    }
+
+    async fn embed_multimodal(&self, text: &str, images: &[ImageInput]) -> Result<Vec<f32>> {
         let url = format!(
             "{}/{}:embedContent?key={}",
             BASE_URL, self.model, self.api_key
@@ -301,7 +343,7 @@ impl EmbeddingProvider for GeminiProvider {
 
         let body = EmbedRequest {
             content: EmbedContent {
-                parts: [TextPart { text }],
+                parts: build_multimodal_parts(text, images),
             },
             output_dimensionality: self.dimension,
         };
@@ -339,10 +381,8 @@ impl EmbeddingProvider for GeminiProvider {
             .iter()
             .map(|t| BatchEmbedItem {
                 model: model_ref.clone(),
-                content: BatchEmbedContent {
-                    parts: [BatchTextPart {
-                        text: t.clone(),
-                    }],
+                content: EmbedContent {
+                    parts: vec![ContentPart::text(t)],
                 },
             })
             .collect();
@@ -413,15 +453,15 @@ impl LlmProvider for GeminiProvider {
             BASE_URL, self.model, self.api_key
         );
 
+        let user_parts = build_multimodal_parts(params.user_message, params.images);
+
         let body = GenerateRequest {
-            contents: [Message {
+            contents: [MultimodalMessage {
                 role: "user",
-                parts: [TextPart {
-                    text: params.user_message,
-                }],
+                parts: user_parts,
             }],
-            system_instruction: params.system.map(|s| Instruction {
-                parts: [TextPart { text: s }],
+            system_instruction: params.system.map(|s| SystemInstruction {
+                parts: vec![ContentPart::text(s)],
             }),
             generation_config: GenConfig {
                 response_mime_type: if params.json_mode {

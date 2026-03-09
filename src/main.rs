@@ -183,6 +183,7 @@ async fn run_cli(cfg: &config::AppConfig) -> Result<()> {
                 .generate(api::GenerateParams {
                     system: None,
                     user_message: &msg.text,
+                    images: &[],
                     json_mode: false,
                     temperature: 0.7,
                 })

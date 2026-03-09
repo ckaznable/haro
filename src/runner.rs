@@ -115,7 +115,7 @@ pub fn spawn_all(
                         if question.is_empty() {
                             return Ok("用法: /ask <問題>".into());
                         }
-                        handle_query(&ctx, question).await
+                        handle_query(&ctx, question, &[]).await
                     })
                 }),
             );
@@ -169,6 +169,7 @@ pub fn spawn_all(
                             llm.generate(api::GenerateParams {
                                 system: Some(&system),
                                 user_message: &user_message,
+                                images: &[],
                                 json_mode: false,
                                 temperature: 0.7,
                             })
@@ -250,7 +251,8 @@ pub fn spawn_all(
                                 q.push(&ctx.agent_id, &msg.text, &ctx.worker_model).await?;
                                 Ok("✓".into())
                             } else {
-                                handle_ingest(&ctx, &msg.text).await
+                                let images = to_image_inputs(&msg.images);
+                                handle_ingest(&ctx, &msg.text, &images).await
                             }
                         }
                     }
@@ -330,10 +332,21 @@ struct MessageContext {
     llm_model: String,
 }
 
+/// 將 channel::ImageData 轉換為 api::ImageInput
+fn to_image_inputs(images: &[crate::channel::ImageData]) -> Vec<api::ImageInput> {
+    images
+        .iter()
+        .map(|img| api::ImageInput {
+            mime_type: img.mime_type.clone(),
+            data: img.data.clone(),
+        })
+        .collect()
+}
+
 /// 僅入庫（ingest 模式），不呼叫 LLM 回覆
-async fn handle_ingest(ctx: &MessageContext, text: &str) -> Result<String> {
+async fn handle_ingest(ctx: &MessageContext, text: &str, images: &[api::ImageInput]) -> Result<String> {
     let (_, wk_usage) =
-        search::ingest(&ctx.pg, &ctx.qdrant, ctx.embedder.as_ref(), ctx.worker.as_ref(), &ctx.agent_id, text).await?;
+        search::ingest(&ctx.pg, &ctx.qdrant, ctx.embedder.as_ref(), ctx.worker.as_ref(), &ctx.agent_id, text, images).await?;
 
     db::postgres::insert_token_usage(&ctx.pg, &ctx.agent_id, &ctx.worker_model, wk_usage.input_tokens, wk_usage.output_tokens).await?;
 
@@ -341,7 +354,7 @@ async fn handle_ingest(ctx: &MessageContext, text: &str) -> Result<String> {
 }
 
 /// 查詢（不入庫）：檢索記憶 + LLM 回答
-async fn handle_query(ctx: &MessageContext, question: &str) -> Result<String> {
+async fn handle_query(ctx: &MessageContext, question: &str, images: &[api::ImageInput]) -> Result<String> {
     let memo = db::postgres::get_scratchpad(&ctx.pg, &ctx.agent_id)
         .await?
         .unwrap_or_default();
@@ -383,7 +396,7 @@ async fn handle_query(ctx: &MessageContext, question: &str) -> Result<String> {
         ctx.prompt
     );
 
-    let result = api::chat_with_tools(ctx.llm.as_ref(), &system, question, &tools).await?;
+    let result = api::chat_with_images(ctx.llm.as_ref(), &system, question, images, &tools).await?;
 
     db::postgres::insert_token_usage(&ctx.pg, &ctx.agent_id, &ctx.llm_model, result.input_tokens, result.output_tokens).await?;
 
@@ -395,11 +408,13 @@ async fn handle_message(
     ctx: &MessageContext,
     msg: &crate::channel::IncomingMessage,
 ) -> Result<String> {
+    let images = to_image_inputs(&msg.images);
+
     // 入庫
-    handle_ingest(ctx, &msg.text).await?;
+    handle_ingest(ctx, &msg.text, &images).await?;
 
     // 查詢 + 回覆
-    handle_query(ctx, &msg.text).await
+    handle_query(ctx, &msg.text, &images).await
 }
 
 const HEARTBEAT_TRIAGE_PROMPT: &str = "\
@@ -448,6 +463,7 @@ async fn run_heartbeat(task: HeartbeatTask) -> Result<()> {
             .generate(api::GenerateParams {
                 system: Some(HEARTBEAT_TRIAGE_PROMPT),
                 user_message: &context,
+                images: &[],
                 json_mode: false,
                 temperature: 0.0,
             })

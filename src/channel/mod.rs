@@ -8,6 +8,13 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
+/// 圖片資料（跨平台共用）
+#[derive(Debug, Clone)]
+pub struct ImageData {
+    pub mime_type: String,
+    pub data: Vec<u8>,
+}
+
 /// 收到的訊息（跨平台共用）
 #[derive(Debug, Clone)]
 pub struct IncomingMessage {
@@ -17,6 +24,8 @@ pub struct IncomingMessage {
     pub sender_id: String,
     /// 訊息文本
     pub text: String,
+    /// 附帶的圖片
+    pub images: Vec<ImageData>,
     /// 用於回覆的 handle（平台各自實作）
     pub reply_handle: ReplyHandle,
 }

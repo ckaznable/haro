@@ -62,6 +62,7 @@ impl Channel for CliChannel {
                     bot_id: "cli".into(),
                     sender_id: "cli".into(),
                     text,
+                    images: vec![],
                     reply_handle: ReplyHandle::Cli,
                 };
 

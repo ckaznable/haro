@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 use tracing::{error, info};
 use uuid::Uuid;
 
-use crate::api::{self, EmbeddingProvider, GenerateResult, LlmProvider};
+use crate::api::{self, EmbeddingProvider, GenerateResult, ImageInput, LlmProvider};
 use crate::db;
 use crate::models::{RankedResult, SearchHit};
 
@@ -37,6 +37,7 @@ async fn should_memorize(worker: &impl LlmProvider, text: &str) -> Result<bool> 
         .generate(api::GenerateParams {
             system: Some(MEMORIZE_PROMPT),
             user_message: text,
+            images: &[],
             json_mode: false,
             temperature: 0.0,
         })
@@ -55,9 +56,10 @@ pub async fn ingest(
     worker: &impl LlmProvider,
     bot_id: &str,
     text: &str,
+    images: &[ImageInput],
 ) -> Result<(Uuid, GenerateResult)> {
-    // 短訊息先判斷是否值得記憶
-    if text.chars().count() <= SHORT_MSG_CHARS {
+    // 有圖片時一律入庫（跳過短訊息判斷）
+    if images.is_empty() && text.chars().count() <= SHORT_MSG_CHARS {
         let worth = should_memorize(worker, text).await?;
         if !worth {
             let token_count = worker.count_tokens(text).await?;
@@ -74,8 +76,8 @@ pub async fn ingest(
         }
     }
 
-    // 1. Worker 模型資料蒸餾
-    let distilled = api::distill(worker, text).await?;
+    // 1. Worker 模型資料蒸餾（含圖片）
+    let distilled = api::distill(worker, text, images).await?;
 
     let Some((data, usage)) = distilled else {
         // 蒸餾失敗，僅存原始訊息到 PG
@@ -92,9 +94,9 @@ pub async fn ingest(
         ));
     };
 
-    // 2. 對 dense_summary 計算向量 + 計算原文 token 數
+    // 2. 對 dense_summary 計算向量（如有圖片則使用多模態 embedding）
     let (vector, token_count) = tokio::try_join!(
-        embedder.embed(&data.dense_summary),
+        embedder.embed_multimodal(&data.dense_summary, images),
         worker.count_tokens(&data.original_text),
     )?;
 
@@ -248,7 +250,7 @@ async fn process_pending_batch(items: Vec<db::postgres::PendingIngestRow>, cfg: 
         .map(|item| {
             let worker = Arc::clone(&cfg.worker);
             let text = item.text.clone();
-            async move { api::distill(worker.as_ref(), &text).await }
+            async move { api::distill(worker.as_ref(), &text, &[]).await }
         })
         .collect();
 

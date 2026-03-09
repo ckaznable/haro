@@ -1,5 +1,6 @@
 # Haro 設定檔
 
+# Agent 設定檔搜尋路徑（每個子目錄 = 一個 agent）
 # agents_path = "agents"
 
 # Fallback channels（當 agents_path 無 agent 時使用）
@@ -7,7 +8,10 @@
 # enable = true
 # channel_type = "telegram"
 # bot_token_env = "TELEGRAM_BOT_TOKEN"
-# allowed_users = []
+# allowed_users = []         # 空 = 不限制
+# allowed_users = ["123456", "@username"]
+
+# ── 資料庫 ──
 
 [database]
 url = "postgres://haro:haro_dev_password@localhost:5432/haro"
@@ -15,18 +19,32 @@ url = "postgres://haro:haro_dev_password@localhost:5432/haro"
 [qdrant]
 url = "http://localhost:6334"
 
+# ── Provider 設定 ──
+# 每個 section 可設定：
+#   provider     = "gemini"         # 目前僅支援 gemini
+#   api_key      = "直接填寫"       # 或使用 api_key_env
+#   api_key_env  = "ENV_VAR_NAME"   # 從環境變數讀取（優先）
+#   model        = "模型名稱"
+#   dimension    = 768              # embedding 專用：向量維度
+#   thinking_budget = 8192          # Gemini 2.5: thinking token 上限 (0=關閉)
+#   thinking_level  = "minimal"     # Gemini 3.x: "minimal"/"low"/"medium"/"high"
+
+# Embedding 模型（文字 + 圖片 → 向量）
 [embedding]
 provider = "gemini"
 api_key_env = "GEMINI_API_KEY"
 dimension = 768
-model = "gemini-embedding-001"
+model = "gemini-embedding-exp-03-07"  # 支援多模態 embedding（文字+圖片）
+# model = "text-embedding-004"       # 純文字 embedding
 
+# 主 LLM（對話回覆、帶工具呼叫）
 [llm]
 provider = "gemini"
 api_key_env = "GEMINI_API_KEY"
-model = "gemini-3.1-flash-lite-preview"
-thinking_level = "minimal"
+model = "gemini-2.5-flash"
+thinking_budget = 1024
 
+# Worker 模型（資料蒸餾、短訊息判斷、圖片描述）
 [worker]
 provider = "gemini"
 api_key_env = "GEMINI_API_KEY"
@@ -42,3 +60,27 @@ thinking_budget = 0
 # api_key_env = "GEMINI_API_KEY"
 # model = "gemini-2.5-pro"
 # thinking_budget = 8192
+
+# ── Agent 設定範例 ──
+# 每個 agent 目錄結構：
+#   agents/<id>/config.toml       ← 必須（頻道 + 模式設定）
+#   agents/<id>/PROMPT.md         ← 選填（自訂系統提示詞）
+#   agents/<id>/SOUL.md           ← 選填（性格設定）
+#   agents/<id>/HEARTBEAT.md      ← 選填（心跳提示詞）
+#   agents/<id>/BRAIN_HEARTBEAT.md ← 選填（大腦心跳提示詞）
+#   agents/<id>/cmd.toml          ← 選填（LLM 互動指令）
+#
+# Agent config.toml 範例：
+#
+#   mode = "chat"                   # "chat"（預設）或 "ingest"
+#
+#   [[channels]]
+#   channel_type = "telegram"
+#   bot_token_env = "MY_BOT_TOKEN"
+#   allowed_users = ["123456"]
+#
+# Ingest 模式：
+#   - 收到訊息只入庫不回覆
+#   - 使用 /ask 查詢已收集的資料
+#   - 入庫使用批次 pipeline（PG 暫存 → 背景處理）
+#   - 支援圖片：Telegram 圖片會經 LLM 描述後入庫

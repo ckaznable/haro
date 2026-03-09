@@ -2,11 +2,12 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use anyhow::Result;
+use teloxide::net::Download;
 use teloxide::prelude::*;
 use teloxide::types::{ChatAction, ParseMode};
 use tracing::{error, info, warn};
 
-use super::{Channel, CommandRegistry, IncomingMessage, MessageHandler, ReplyHandle};
+use super::{Channel, CommandRegistry, ImageData, IncomingMessage, MessageHandler, ReplyHandle};
 
 /// Telegram Bot 頻道實作
 pub struct TelegramChannel {
@@ -60,6 +61,51 @@ fn parse_command(text: &str) -> Option<(&str, &str)> {
     Some((cmd, args.trim()))
 }
 
+/// 從 Telegram Message 取得文字（text 或 caption）
+fn extract_text(msg: &Message) -> Option<String> {
+    msg.text()
+        .or_else(|| msg.caption())
+        .map(str::to_owned)
+}
+
+/// 下載 Telegram 圖片（選最大尺寸），回傳 ImageData
+async fn download_photo(bot: &Bot, msg: &Message) -> Option<ImageData> {
+    let photos = msg.photo()?;
+    // Telegram 回傳多種尺寸，選最大的（最後一個）
+    let largest = photos.last()?;
+
+    let file = match bot.get_file(largest.file.id.clone()).await {
+        Ok(f) => f,
+        Err(e) => {
+            warn!("取得圖片檔案資訊失敗: {e}");
+            return None;
+        }
+    };
+
+    let mut buf = Vec::new();
+    if let Err(e) = bot.download_file(&file.path, &mut buf).await {
+        warn!("下載圖片失敗: {e}");
+        return None;
+    }
+
+    // 由副檔名推斷 MIME type
+    let mime = if file.path.ends_with(".png") {
+        "image/png"
+    } else {
+        "image/jpeg"
+    };
+
+    Some(ImageData {
+        mime_type: mime.to_owned(),
+        data: buf,
+    })
+}
+
+/// 判斷訊息是否包含需要處理的內容（文字或圖片）
+fn has_content(msg: &Message) -> bool {
+    msg.text().is_some() || msg.caption().is_some() || msg.photo().is_some()
+}
+
 impl Channel for TelegramChannel {
     fn start(
         self: Box<Self>,
@@ -75,8 +121,8 @@ impl Channel for TelegramChannel {
             Dispatcher::builder(
                 bot,
                 Update::filter_message()
-                    .filter_map(|msg: Message| msg.text().map(str::to_owned))
-                    .endpoint(move |bot: Bot, msg: Message, text: String| {
+                    .filter(|msg: Message| has_content(&msg))
+                    .endpoint(move |bot: Bot, msg: Message| {
                         let handler = Arc::clone(&handler);
                         let allowed = Arc::clone(&allowed_users);
                         let commands = Arc::clone(&commands);
@@ -107,8 +153,11 @@ impl Channel for TelegramChannel {
                                 .map(|u| u.id.0.to_string())
                                 .unwrap_or_default();
 
-                            // 檢查是否為已註冊的指令
-                            if let Some((cmd, args)) = parse_command(&text)
+                            let text = extract_text(&msg).unwrap_or_default();
+
+                            // 檢查是否為已註冊的指令（僅純文字訊息）
+                            if msg.photo().is_none()
+                                && let Some((cmd, args)) = parse_command(&text)
                                 && let Some(cmd_handler) = commands.resolve(cmd)
                             {
                                 let result = cmd_handler(sender_id, args.to_owned()).await;
@@ -122,6 +171,16 @@ impl Channel for TelegramChannel {
                                 }
                                 return respond(());
                             }
+
+                            // 下載圖片（如有）
+                            let images = if msg.photo().is_some() {
+                                match download_photo(&bot, &msg).await {
+                                    Some(img) => vec![img],
+                                    None => vec![],
+                                }
+                            } else {
+                                vec![]
+                            };
 
                             // 持續發送「輸入中…」狀態直到處理完成
                             let typing_bot = bot.clone();
@@ -139,6 +198,7 @@ impl Channel for TelegramChannel {
                                 bot_id: String::new(),
                                 sender_id,
                                 text,
+                                images,
                                 reply_handle: ReplyHandle::Telegram {
                                     chat_id: msg.chat.id.0,
                                 },
