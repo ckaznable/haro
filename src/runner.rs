@@ -91,6 +91,42 @@ pub fn spawn_all(
             register_heartbeat_commands(&mut cmd_registry, apath);
         }
 
+        // Skills 目錄（存在才啟用）
+        let skills_path = agent_path
+            .as_ref()
+            .map(|p| p.join("skills"))
+            .filter(|p| p.is_dir());
+
+        // /skills 指令：列出可用 skills
+        if let Some(ref sp) = skills_path {
+            let sp_clone = sp.clone();
+            cmd_registry.register(
+                "skills",
+                "列出可用的 skills",
+                "/skills",
+                Arc::new(move |_sender, _args| {
+                    let sp = sp_clone.clone();
+                    Box::pin(async move {
+                        let entries = tool::skills::list_skill_entries(&sp);
+                        if entries.is_empty() {
+                            return Ok("目前沒有可用的 skills。".into());
+                        }
+                        let list: Vec<String> = entries
+                            .iter()
+                            .map(|(name, desc)| {
+                                if desc.is_empty() {
+                                    format!("• {name}")
+                                } else {
+                                    format!("• {name} — {desc}")
+                                }
+                            })
+                            .collect();
+                        Ok(format!("可用 Skills:\n{}", list.join("\n")))
+                    })
+                }),
+            );
+        }
+
         // ingest 模式：註冊 /ask 指令，用於查詢向量資料庫
         if agent_mode == AgentMode::Ingest {
             let ask_ctx = Arc::new(MessageContext {
@@ -105,6 +141,7 @@ pub fn spawn_all(
                 worker_model: cfg.worker.model.clone(),
                 llm_model: cfg.llm.model.clone(),
                 image_embed: cfg.embedding.image_embed,
+                skills_path: skills_path.clone(),
             });
             cmd_registry.register(
                 "ask",
@@ -238,6 +275,7 @@ pub fn spawn_all(
                 worker_model: cfg.worker.model.clone(),
                 llm_model: cfg.llm.model.clone(),
                 image_embed: cfg.embedding.image_embed,
+                skills_path: skills_path.clone(),
             });
 
             let mode = agent_mode.clone();
@@ -336,6 +374,8 @@ struct MessageContext {
     worker_model: String,
     llm_model: String,
     image_embed: bool,
+    /// Agent 的 skills 目錄路徑（None = 無 skills）
+    skills_path: Option<std::path::PathBuf>,
 }
 
 /// 將 channel::ImageData 轉換為 api::ImageInput
@@ -383,6 +423,14 @@ async fn handle_query(ctx: &MessageContext, question: &str, images: &[api::Image
     }
     tools.register(tool::fetch::tool());
 
+    // 註冊 skills 工具（如有 skills 目錄）
+    let has_skills = ctx.skills_path.is_some();
+    if let Some(ref sp) = ctx.skills_path {
+        for t in tool::skills::tools(sp.clone()) {
+            tools.register(t);
+        }
+    }
+
     let context_str: String = results
         .iter()
         .enumerate()
@@ -398,6 +446,13 @@ async fn handle_query(ctx: &MessageContext, question: &str, images: &[api::Image
         format!("## 性格設定\n{}\n\n", ctx.soul)
     };
 
+    let skills_instruction = if has_skills {
+        "\n如果使用者要求使用某個 skill，請先使用 list_skills 工具查看可用的 skills，\
+         再使用 get_skill 工具載入該 skill 的內容並依照其指示執行。"
+    } else {
+        ""
+    };
+
     let system = format!(
         "你是一個知識庫助手，根據已收集的資料回答問題。\n\n\
          目前時間：{now}\n\n\
@@ -408,7 +463,7 @@ async fn handle_query(ctx: &MessageContext, question: &str, images: &[api::Image
          ## 指示\n\
          請根據上述資料回答使用者的問題。\n\
          如果資料中沒有相關內容，請如實告知。\n\
-         如果有重要的事情需要記住，請使用 save_memo 工具儲存。",
+         如果有重要的事情需要記住，請使用 save_memo 工具儲存。{skills_instruction}",
         ctx.prompt
     );
 

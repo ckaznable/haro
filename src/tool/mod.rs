@@ -1,5 +1,6 @@
 pub mod fetch;
 pub mod scratchpad;
+pub mod skills;
 
 use std::future::Future;
 use std::pin::Pin;
