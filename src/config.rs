@@ -58,6 +58,9 @@ pub struct ProviderConfig {
     pub model: String,
     /// Embedding 向量維度
     pub dimension: Option<u64>,
+    /// 啟用圖片多模態 embedding（需要支援多模態的 embedding model）
+    #[serde(default)]
+    pub image_embed: bool,
     /// Gemini 2.5: thinking token 上限 (0=關閉, -1=dynamic)
     pub thinking_budget: Option<i32>,
     /// Gemini 3.x: thinking 等級 ("minimal" / "low" / "medium" / "high")

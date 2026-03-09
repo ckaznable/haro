@@ -34,8 +34,8 @@ url = "http://localhost:6334"
 provider = "gemini"
 api_key_env = "GEMINI_API_KEY"
 dimension = 768
-model = "gemini-embedding-exp-03-07"  # 支援多模態 embedding（文字+圖片）
-# model = "text-embedding-004"       # 純文字 embedding
+model = "gemini-embedding-001"  # 支援多模態 embedding（文字+圖片）
+# model = "gemini-embedding-001"       # 純文字 embedding
 
 # 主 LLM（對話回覆、帶工具呼叫）
 [llm]

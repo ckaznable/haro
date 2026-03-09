@@ -104,6 +104,7 @@ pub fn spawn_all(
                 soul: agent_soul.clone(),
                 worker_model: cfg.worker.model.clone(),
                 llm_model: cfg.llm.model.clone(),
+                image_embed: cfg.embedding.image_embed,
             });
             cmd_registry.register(
                 "ask",
@@ -236,6 +237,7 @@ pub fn spawn_all(
                 soul: agent_soul.clone(),
                 worker_model: cfg.worker.model.clone(),
                 llm_model: cfg.llm.model.clone(),
+                image_embed: cfg.embedding.image_embed,
             });
 
             let mode = agent_mode.clone();
@@ -333,6 +335,7 @@ struct MessageContext {
     soul: String,
     worker_model: String,
     llm_model: String,
+    image_embed: bool,
 }
 
 /// 將 channel::ImageData 轉換為 api::ImageInput
@@ -357,8 +360,9 @@ fn extract_image_meta(images: &[crate::channel::ImageData]) -> (Vec<String>, Opt
 
 /// 僅入庫（ingest 模式），不呼叫 LLM 回覆
 async fn handle_ingest(ctx: &MessageContext, text: &str, images: &[api::ImageInput], image_meta: &ImageMeta<'_>) -> Result<()> {
+    let embed_images = if ctx.image_embed { images } else { &[] };
     let (_, wk_usage) =
-        search::ingest(&ctx.pg, &ctx.qdrant, ctx.embedder.as_ref(), ctx.worker.as_ref(), &ctx.agent_id, text, images, image_meta).await?;
+        search::ingest(&ctx.pg, &ctx.qdrant, ctx.embedder.as_ref(), ctx.worker.as_ref(), &ctx.agent_id, text, embed_images, image_meta).await?;
 
     db::postgres::insert_token_usage(&ctx.pg, &ctx.agent_id, &ctx.worker_model, wk_usage.input_tokens, wk_usage.output_tokens).await?;
 
@@ -424,10 +428,10 @@ async fn handle_message(
     let (file_ids, source_chat_id, source_message_id) = extract_image_meta(&msg.images);
     let image_meta = ImageMeta { file_ids: &file_ids, source_chat_id, source_message_id };
 
-    // 入庫
+    // 入庫（image_embed 由 handle_ingest 內部判斷）
     handle_ingest(ctx, &msg.text, &images, &image_meta).await?;
 
-    // 查詢 + 回覆
+    // 查詢 + 回覆（LLM chat 端一律傳圖，不受 image_embed 影響）
     handle_query(ctx, &msg.text, &images).await.map(Some)
 }
 
