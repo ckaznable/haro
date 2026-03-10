@@ -43,6 +43,9 @@ futures = "0.3"
 # Encoding
 base64 = "0.22"
 
+# Text processing
+regex = "1"
+
 # Utilities
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
@@ -50,6 +53,9 @@ thiserror = "2"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 telegram-markdown-v2 = "0.2"
+
+[dev-dependencies]
+axum = "0.8"
 
 [profile.release]
 codegen-units = 1 # Allows LLVM to perform better optimization.
