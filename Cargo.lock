@@ -1078,6 +1078,7 @@ dependencies = [
  "sqlx",
  "telegram-markdown-v2",
  "teloxide",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "toml",

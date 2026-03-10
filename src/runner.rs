@@ -6,7 +6,7 @@ use tracing::{error, info};
 
 use crate::agent::{Agent, AgentMode};
 use crate::api::{self, LlmProvider};
-use crate::channel::{CommandRegistry, MessageHandler};
+use crate::channel::{CommandRegistry, MessageHandler, Notifier};
 use crate::config::AppConfig;
 use crate::db::postgres::ImageMeta;
 use crate::{db, search, tool};
@@ -46,6 +46,14 @@ pub fn spawn_all(
         let agent_path = agent.path;
         let agent_llm_commands = agent.llm_commands;
 
+        // 收集所有頻道的 notifier（在 channel.start() 消耗 channel 前）
+        let notifiers: Vec<Arc<dyn Notifier>> = agent
+            .channels
+            .iter()
+            .filter_map(|ch| ch.notifier())
+            .map(|n| Arc::from(n))
+            .collect();
+
         // 啟動 LLM 心跳任務
         if !agent_heartbeat.is_empty() {
             info!(agent_id = %agent_id, interval = heartbeat_interval, "啟動 LLM 心跳任務");
@@ -58,6 +66,7 @@ pub fn spawn_all(
                 heartbeat_prompt: agent_heartbeat,
                 interval_secs: heartbeat_interval,
                 llm_model: cfg.llm.model.clone(),
+                notifiers: notifiers.clone(),
             })));
         }
 
@@ -73,6 +82,7 @@ pub fn spawn_all(
                 heartbeat_prompt: agent_brain_heartbeat,
                 interval_secs: heartbeat_interval,
                 llm_model: brain_model.clone(),
+                notifiers: notifiers.clone(),
             })));
         }
 
@@ -506,6 +516,7 @@ struct HeartbeatTask {
     heartbeat_prompt: String,
     interval_secs: u64,
     llm_model: String,
+    notifiers: Vec<Arc<dyn Notifier>>,
 }
 
 /// 心跳任務：定期喚醒 worker 判斷是否需要呼叫 LLM 執行任務
@@ -562,6 +573,15 @@ async fn run_heartbeat(task: HeartbeatTask) -> Result<()> {
             tools.register(t);
         }
         tools.register(tool::fetch::tool());
+        if !task.notifiers.is_empty() {
+            tools.register(tool::notify::tool(task.notifiers.clone()));
+        }
+
+        let notify_instruction = if task.notifiers.is_empty() {
+            ""
+        } else {
+            "\n如果需要主動通知使用者，請使用 send_message 工具發送訊息到頻道。"
+        };
 
         let system = format!(
             "你是一個具有長期記憶的 AI 助手。\n\n\
@@ -570,7 +590,7 @@ async fn run_heartbeat(task: HeartbeatTask) -> Result<()> {
              ## 備忘錄 (Scratchpad)\n{memo}\n\n\
              ## 指示\n\
              這是一個定期心跳喚醒。請根據以下心跳指示執行任務。\n\
-             如果有重要的事情需要記住，請使用 save_memo 工具儲存到備忘錄中。\n\n\
+             如果有重要的事情需要記住，請使用 save_memo 工具儲存到備忘錄中。{notify_instruction}\n\n\
              ## 心跳指示\n{}",
             task.agent_prompt, task.heartbeat_prompt
         );

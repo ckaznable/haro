@@ -7,7 +7,7 @@ use teloxide::prelude::*;
 use teloxide::types::{ChatAction, ParseMode, ReactionType};
 use tracing::{error, info, warn};
 
-use super::{Channel, CommandRegistry, ImageData, IncomingMessage, MessageHandler, ReplyHandle};
+use super::{Channel, CommandRegistry, ImageData, IncomingMessage, MessageHandler, Notifier, ReplyHandle};
 
 /// Telegram Bot 頻道實作
 pub struct TelegramChannel {
@@ -109,7 +109,43 @@ fn has_content(msg: &Message) -> bool {
     msg.text().is_some() || msg.caption().is_some() || msg.photo().is_some()
 }
 
+/// Telegram 主動通知器
+pub struct TelegramNotifier {
+    bot: Bot,
+    chat_ids: Vec<ChatId>,
+}
+
+impl Notifier for TelegramNotifier {
+    fn send<'a>(&'a self, message: &'a str) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
+        Box::pin(async move {
+            for &chat_id in &self.chat_ids {
+                send_reply(&self.bot, chat_id, message).await;
+            }
+            Ok(())
+        })
+    }
+}
+
 impl Channel for TelegramChannel {
+    fn notifier(&self) -> Option<Box<dyn Notifier>> {
+        // allowed_users 中的純數字 ID 可作為私聊 chat_id
+        let chat_ids: Vec<ChatId> = self
+            .allowed_users
+            .iter()
+            .filter_map(|u| u.parse::<i64>().ok())
+            .map(ChatId)
+            .collect();
+
+        if chat_ids.is_empty() {
+            return None;
+        }
+
+        Some(Box::new(TelegramNotifier {
+            bot: self.bot.clone(),
+            chat_ids,
+        }))
+    }
+
     fn start(
         self: Box<Self>,
         handler: MessageHandler,

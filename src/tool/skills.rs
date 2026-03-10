@@ -153,3 +153,121 @@ impl Tool for GetSkillTool {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn setup_skills_dir() -> TempDir {
+        let dir = TempDir::new().unwrap();
+        let skills = dir.path();
+        fs::write(skills.join("coding.md"), "# Coding\nWrite clean code.").unwrap();
+        fs::write(skills.join("translate.md"), "# Translation\nTranslate text.").unwrap();
+        fs::write(skills.join("empty.md"), "").unwrap();
+        fs::write(skills.join("not_a_skill.txt"), "ignored").unwrap();
+        dir
+    }
+
+    #[test]
+    fn list_entries_finds_md_files() {
+        let dir = setup_skills_dir();
+        let entries = list_skill_entries(dir.path());
+
+        assert_eq!(entries.len(), 3);
+        // 按名稱排序
+        assert_eq!(entries[0].0, "coding");
+        assert_eq!(entries[0].1, "Coding");
+        assert_eq!(entries[1].0, "empty");
+        assert_eq!(entries[1].1, "");
+        assert_eq!(entries[2].0, "translate");
+        assert_eq!(entries[2].1, "Translation");
+    }
+
+    #[test]
+    fn list_entries_ignores_non_md() {
+        let dir = setup_skills_dir();
+        let entries = list_skill_entries(dir.path());
+        let names: Vec<&str> = entries.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(!names.contains(&"not_a_skill"));
+    }
+
+    #[test]
+    fn list_entries_nonexistent_dir() {
+        let entries = list_skill_entries(Path::new("/nonexistent/path"));
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn list_entries_empty_dir() {
+        let dir = TempDir::new().unwrap();
+        let entries = list_skill_entries(dir.path());
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn heading_prefix_stripped() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("test.md"), "## Sub heading\nBody").unwrap();
+        let entries = list_skill_entries(dir.path());
+        assert_eq!(entries[0].1, "Sub heading");
+    }
+
+    #[tokio::test]
+    async fn list_skills_tool_output() {
+        let dir = setup_skills_dir();
+        let tool_list = tools(dir.path().to_path_buf());
+        let list_tool = &tool_list[0];
+        assert_eq!(list_tool.definition().name, "list_skills");
+
+        let result = list_tool.call(json!({})).await.unwrap();
+        assert!(result.contains("coding — Coding"));
+        assert!(result.contains("translate — Translation"));
+    }
+
+    #[tokio::test]
+    async fn list_skills_tool_empty() {
+        let dir = TempDir::new().unwrap();
+        let tool_list = tools(dir.path().to_path_buf());
+        let result = tool_list[0].call(json!({})).await.unwrap();
+        assert!(result.contains("沒有可用"));
+    }
+
+    #[tokio::test]
+    async fn get_skill_returns_content_and_path() {
+        let dir = setup_skills_dir();
+        let tool_list = tools(dir.path().to_path_buf());
+        let get_tool = &tool_list[1];
+        assert_eq!(get_tool.definition().name, "get_skill");
+
+        let result = get_tool.call(json!({"name": "coding"})).await.unwrap();
+        assert!(result.contains("## Skill: coding"));
+        assert!(result.contains("base_path"));
+        assert!(result.contains("Write clean code."));
+    }
+
+    #[tokio::test]
+    async fn get_skill_not_found() {
+        let dir = setup_skills_dir();
+        let tool_list = tools(dir.path().to_path_buf());
+        let result = tool_list[1].call(json!({"name": "nope"})).await.unwrap();
+        assert!(result.contains("找不到"));
+    }
+
+    #[tokio::test]
+    async fn get_skill_path_traversal_blocked() {
+        let dir = setup_skills_dir();
+        let tool_list = tools(dir.path().to_path_buf());
+        let result = tool_list[1].call(json!({"name": "../etc/passwd"})).await.unwrap();
+        assert!(result.contains("無效"));
+    }
+
+    #[tokio::test]
+    async fn get_skill_empty_name() {
+        let dir = setup_skills_dir();
+        let tool_list = tools(dir.path().to_path_buf());
+        let result = tool_list[1].call(json!({"name": ""})).await.unwrap();
+        assert!(result.contains("未提供"));
+    }
+}

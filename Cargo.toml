@@ -56,6 +56,7 @@ telegram-markdown-v2 = "0.2"
 
 [dev-dependencies]
 axum = "0.8"
+tempfile = "3"
 
 [profile.release]
 codegen-units = 1 # Allows LLVM to perform better optimization.

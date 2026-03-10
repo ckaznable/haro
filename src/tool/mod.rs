@@ -1,4 +1,5 @@
 pub mod fetch;
+pub mod notify;
 pub mod scratchpad;
 pub mod skills;
 
@@ -82,5 +83,80 @@ impl ToolRegistry {
             .find(|t| t.definition().name == name)
             .ok_or_else(|| anyhow::anyhow!("未知工具: {name}"))?;
         tool.call(args).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// 簡單的測試用工具
+    struct EchoTool;
+
+    impl Tool for EchoTool {
+        fn definition(&self) -> ToolDef {
+            ToolDef {
+                name: "echo".into(),
+                description: "Echo back input".into(),
+                parameters: json!({"type": "object", "properties": {"msg": {"type": "string"}}}),
+            }
+        }
+
+        fn call(
+            &self,
+            args: serde_json::Value,
+        ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + '_>> {
+            Box::pin(async move {
+                let msg = args.get("msg").and_then(|v| v.as_str()).unwrap_or("(empty)");
+                Ok(msg.to_owned())
+            })
+        }
+    }
+
+    #[test]
+    fn registry_definitions() {
+        let mut reg = ToolRegistry::new();
+        reg.register(Box::new(EchoTool));
+
+        let defs = reg.definitions();
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].name, "echo");
+    }
+
+    #[tokio::test]
+    async fn registry_call_existing_tool() {
+        let mut reg = ToolRegistry::new();
+        reg.register(Box::new(EchoTool));
+
+        let result = reg.call("echo", json!({"msg": "hello"})).await.unwrap();
+        assert_eq!(result, "hello");
+    }
+
+    #[tokio::test]
+    async fn registry_call_unknown_tool_errors() {
+        let reg = ToolRegistry::new();
+        let result = reg.call("nonexistent", json!({})).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("未知工具"));
+    }
+
+    #[test]
+    fn registry_empty() {
+        let reg = ToolRegistry::new();
+        assert!(reg.definitions().is_empty());
+    }
+
+    #[test]
+    fn registry_multiple_tools() {
+        let mut reg = ToolRegistry::new();
+        reg.register(Box::new(EchoTool));
+        reg.register(fetch::tool());
+
+        let defs = reg.definitions();
+        assert_eq!(defs.len(), 2);
+        let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+        assert!(names.contains(&"echo"));
+        assert!(names.contains(&"fetch"));
     }
 }

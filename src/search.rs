@@ -400,3 +400,90 @@ fn rrf_fuse(
     results.truncate(top_k);
     results
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hit(id: Uuid, text: &str, days_ago: i64) -> SearchHit {
+        SearchHit {
+            id,
+            original_text: text.to_owned(),
+            created_at: Utc::now() - chrono::Duration::days(days_ago),
+        }
+    }
+
+    #[test]
+    fn rrf_single_source() {
+        let id = Uuid::new_v4();
+        let vector = vec![hit(id, "hello", 0)];
+        let results = rrf_fuse(&vector, &[], 5);
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, id);
+        // RRF score = 1/(60+1) ≈ 0.01639
+        assert!((results[0].score - 1.0 / 61.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn rrf_both_sources_boost() {
+        let id = Uuid::new_v4();
+        let h = hit(id, "both", 0);
+        let results = rrf_fuse(&[h.clone()], &[h], 5);
+
+        assert_eq!(results.len(), 1);
+        // 出現在兩個來源 rank=1 → score = 2/(60+1)
+        assert!((results[0].score - 2.0 / 61.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn rrf_ranking_order() {
+        let id_a = Uuid::new_v4();
+        let id_b = Uuid::new_v4();
+
+        // A: rank 1 in vector, absent from BM25
+        // B: rank 1 in BM25, absent from vector
+        // → 同分，順序不重要但兩者都應出現
+        let vector = vec![hit(id_a, "a", 0)];
+        let bm25 = vec![hit(id_b, "b", 0)];
+        let results = rrf_fuse(&vector, &bm25, 5);
+
+        assert_eq!(results.len(), 2);
+        let ids: Vec<Uuid> = results.iter().map(|r| r.id).collect();
+        assert!(ids.contains(&id_a));
+        assert!(ids.contains(&id_b));
+    }
+
+    #[test]
+    fn rrf_top_k_truncation() {
+        let hits: Vec<SearchHit> = (0..10)
+            .map(|i| hit(Uuid::new_v4(), &format!("doc{i}"), 0))
+            .collect();
+        let results = rrf_fuse(&hits, &[], 3);
+        assert_eq!(results.len(), 3);
+    }
+
+    #[test]
+    fn rrf_time_decay() {
+        let id_new = Uuid::new_v4();
+        let id_old = Uuid::new_v4();
+
+        // 相同 RRF rank，但 old 是 100 天前
+        let vector = vec![hit(id_new, "new", 0), hit(id_old, "old", 100)];
+        let results = rrf_fuse(&vector, &[], 5);
+
+        assert_eq!(results.len(), 2);
+        // 較新的文件 RRF rank 較低 (rank 1 > rank 2) 但 decay 補償
+        // id_new: rank=1, score = 1/61 * decay(0) ≈ 0.01639
+        // id_old: rank=2, score = 1/62 * decay(100) ≈ 0.01613 * e^(-1) ≈ 0.00593
+        let new_result = results.iter().find(|r| r.id == id_new).unwrap();
+        let old_result = results.iter().find(|r| r.id == id_old).unwrap();
+        assert!(new_result.score > old_result.score);
+    }
+
+    #[test]
+    fn rrf_empty_inputs() {
+        let results = rrf_fuse(&[], &[], 5);
+        assert!(results.is_empty());
+    }
+}

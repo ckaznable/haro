@@ -9,6 +9,10 @@ use super::{Channel, CommandRegistry, IncomingMessage, MessageHandler, ReplyHand
 pub struct CliChannel;
 
 impl Channel for CliChannel {
+    fn notifier(&self) -> Option<Box<dyn super::Notifier>> {
+        None
+    }
+
     fn start(
         self: Box<Self>,
         handler: MessageHandler,

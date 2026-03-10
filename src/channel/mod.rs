@@ -125,13 +125,94 @@ impl CommandRegistry {
     }
 }
 
+/// 頻道通知器：可主動向頻道發送訊息（用於心跳任務等）
+pub trait Notifier: Send + Sync {
+    /// 發送訊息到頻道
+    fn send<'a>(&'a self, message: &'a str) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
+}
+
 /// 訊息頻道抽象（Telegram / Discord / LINE / ...）
 ///
 /// `start` 消耗 channel 並啟動監聽迴圈，收到訊息時透過 handler 處理
 pub trait Channel: Send + Sync {
+    /// 建立通知器（在 start 消耗 channel 前呼叫），回傳 None 表示此頻道不支援主動通知
+    fn notifier(&self) -> Option<Box<dyn Notifier>>;
+
     fn start(
         self: Box<Self>,
         handler: MessageHandler,
         commands: Arc<CommandRegistry>,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send>>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn noop_handler() -> CommandFn {
+        Arc::new(|_sender, _args| Box::pin(async { Ok("ok".into()) }))
+    }
+
+    #[test]
+    fn register_and_resolve() {
+        let mut reg = CommandRegistry::new();
+        reg.register("ping", "check", "/ping", noop_handler());
+
+        assert!(reg.resolve("ping").is_some());
+        assert!(reg.resolve("unknown").is_none());
+    }
+
+    #[test]
+    fn help_text_contains_all_commands() {
+        let mut reg = CommandRegistry::new();
+        reg.register("ping", "檢查在線", "/ping", noop_handler());
+        reg.register("help", "顯示幫助", "/help", noop_handler());
+
+        let help = reg.help_text();
+        assert!(help.contains("/ping — 檢查在線"));
+        assert!(help.contains("/help — 顯示幫助"));
+    }
+
+    #[test]
+    fn help_text_preserves_insertion_order() {
+        let mut reg = CommandRegistry::new();
+        reg.register("aaa", "first", "/aaa", noop_handler());
+        reg.register("zzz", "second", "/zzz", noop_handler());
+        reg.register("mmm", "third", "/mmm", noop_handler());
+
+        let help = reg.help_text();
+        let lines: Vec<&str> = help.lines().collect();
+        assert!(lines[0].contains("aaa"));
+        assert!(lines[1].contains("zzz"));
+        assert!(lines[2].contains("mmm"));
+    }
+
+    #[test]
+    fn register_override_replaces_handler() {
+        let mut reg = CommandRegistry::new();
+        reg.register("test", "v1", "/test", noop_handler());
+        reg.register("test", "v2", "/test v2", noop_handler());
+
+        let help = reg.help_text();
+        // 覆蓋後只出現一次，使用新的 description
+        assert!(help.contains("v2"));
+        assert_eq!(help.matches("test").count(), 1);
+    }
+
+    #[tokio::test]
+    async fn command_handler_receives_args() {
+        let mut reg = CommandRegistry::new();
+        reg.register(
+            "echo",
+            "echo",
+            "/echo",
+            Arc::new(|_sender, args| {
+                Box::pin(async move { Ok(format!("got: {args}")) })
+            }),
+        );
+
+        let handler = reg.resolve("echo").unwrap();
+        let result = handler("user".into(), "hello world".into()).await.unwrap();
+        assert_eq!(result, "got: hello world");
+    }
 }
