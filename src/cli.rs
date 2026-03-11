@@ -1,17 +1,19 @@
 use std::io::{self, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::Args;
+
+use crate::config;
 
 #[derive(Args)]
 pub struct InitAgentArgs {
     /// Agent ID（即目錄名稱），未提供則互動詢問
     pub name: Option<String>,
 
-    /// agents 根目錄（預設 "agents"）
-    #[arg(long, default_value = "agents")]
-    pub base: String,
+    /// agents 根目錄（預設 ~/.local/share/haro/agents）
+    #[arg(long)]
+    pub base: Option<PathBuf>,
 }
 
 pub fn init_agent(args: InitAgentArgs) -> Result<()> {
@@ -26,7 +28,15 @@ pub fn init_agent(args: InitAgentArgs) -> Result<()> {
         anyhow::bail!("Agent ID 不可為空");
     }
 
-    let agent_dir = Path::new(&args.base).join(&name);
+    // 解析 agents 根目錄：--base > config agents_path > default
+    let base = args.base.unwrap_or_else(|| {
+        config::AppConfig::load()
+            .ok()
+            .map(|c| c.agents_dir())
+            .unwrap_or_else(config::default_agents_dir)
+    });
+
+    let agent_dir = base.join(&name);
     if agent_dir.exists() {
         anyhow::bail!("Agent 目錄已存在: {}", agent_dir.display());
     }

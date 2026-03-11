@@ -53,6 +53,7 @@ thiserror = "2"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 telegram-markdown-v2 = "0.2"
+directories = "6.0.0"
 
 [dev-dependencies]
 axum = "0.8"

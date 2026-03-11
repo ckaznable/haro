@@ -1,6 +1,7 @@
 # Haro 設定檔
 
 # Agent 設定檔搜尋路徑（每個子目錄 = 一個 agent）
+# 未設定時預設為 ~/.local/share/haro/agents（XDG data dir）
 # agents_path = "agents"
 
 # Fallback channels（當 agents_path 無 agent 時使用）
@@ -36,6 +37,7 @@ api_key_env = "GEMINI_API_KEY"
 dimension = 768
 model = "gemini-embedding-001"  # 支援多模態 embedding（文字+圖片）
 # model = "gemini-embedding-001"       # 純文字 embedding
+# image_embed = true # 啟動image embed
 
 # 主 LLM（對話回覆、帶工具呼叫）
 [llm]

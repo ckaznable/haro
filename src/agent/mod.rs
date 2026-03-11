@@ -38,8 +38,8 @@ pub struct Agent {
 ///     ├── config.toml
 ///     └── PROMPT.md
 /// ```
-pub fn load_agents(agents_path: &str) -> Result<Vec<Agent>> {
-    let base = Path::new(agents_path);
+pub fn load_agents(agents_path: &Path) -> Result<Vec<Agent>> {
+    let base = agents_path;
     if !base.is_dir() {
         return Ok(vec![]);
     }

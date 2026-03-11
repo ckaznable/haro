@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use tracing::info;
@@ -127,6 +129,15 @@ impl AppConfig {
         Ok(cfg)
     }
 
+    /// 取得有效的 agents 路徑：config 指定 > data_local_dir/haro/agents
+    pub fn agents_dir(&self) -> PathBuf {
+        if let Some(p) = &self.agents_path {
+            PathBuf::from(p)
+        } else {
+            default_agents_dir()
+        }
+    }
+
     fn validate(&self) -> Result<()> {
         if self.embedding.api_key.is_empty() {
             anyhow::bail!(
@@ -145,4 +156,11 @@ impl AppConfig {
         }
         Ok(())
     }
+}
+
+/// 預設 agents 路徑：$XDG_DATA_HOME/haro/agents（Linux: ~/.local/share/haro/agents）
+pub fn default_agents_dir() -> PathBuf {
+    directories::ProjectDirs::from("", "", "haro")
+        .map(|d| d.data_local_dir().join("agents"))
+        .unwrap_or_else(|| PathBuf::from("agents"))
 }

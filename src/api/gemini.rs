@@ -278,17 +278,21 @@ struct ToolRequestPart {
     function_call: Option<FnCallData>,
     #[serde(skip_serializing_if = "Option::is_none")]
     function_response: Option<FnResponseData>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thought: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thought_signature: Option<String>,
 }
 
 impl ToolRequestPart {
     fn text(s: String) -> Self {
-        Self { text: Some(s), function_call: None, function_response: None }
+        Self { text: Some(s), function_call: None, function_response: None, thought: None, thought_signature: None }
     }
     fn function_call(fc: FnCallData) -> Self {
-        Self { text: None, function_call: Some(fc), function_response: None }
+        Self { text: None, function_call: Some(fc), function_response: None, thought: None, thought_signature: None }
     }
     fn function_response(fr: FnResponseData) -> Self {
-        Self { text: None, function_call: None, function_response: Some(fr) }
+        Self { text: None, function_call: None, function_response: Some(fr), thought: None, thought_signature: None }
     }
 }
 
@@ -356,6 +360,8 @@ struct ToolResponsePart {
     function_call: Option<FnCallData>,
     #[serde(default)]
     thought: Option<bool>,
+    #[serde(default)]
+    thought_signature: Option<String>,
 }
 
 // ── 實作 ──
@@ -747,12 +753,18 @@ impl LlmProvider for GeminiProvider {
                 });
             }
 
-            // 加入模型的 function call 到對話歷史
+            // 加入模型的所有 parts 到對話歷史（保留 thought + thought_signature）
             contents.push(ToolMessage {
                 role: "model".into(),
-                parts: fn_calls
-                    .iter()
-                    .map(|fc| ToolRequestPart::function_call(fc.clone()))
+                parts: parts
+                    .into_iter()
+                    .map(|p| ToolRequestPart {
+                        text: p.text,
+                        function_call: p.function_call,
+                        function_response: None,
+                        thought: p.thought,
+                        thought_signature: p.thought_signature,
+                    })
                     .collect(),
             });
 

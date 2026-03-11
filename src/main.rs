@@ -115,12 +115,9 @@ async fn main() -> Result<()> {
         brain,
     };
 
-    // 載入所有 Agent（優先從 agents_path，fallback 到 config.toml [[channels]]）
-    let mut agents = if let Some(path) = &cfg.agents_path {
-        agent::load_agents(path)?
-    } else {
-        Vec::new()
-    };
+    // 載入所有 Agent（agents_dir → fallback config.toml [[channels]]）
+    let agents_dir = cfg.agents_dir();
+    let mut agents = agent::load_agents(&agents_dir)?;
 
     if agents.is_empty() {
         let enabled: Vec<_> = cfg.channels.iter().filter(|c| c.enable).cloned().collect();
@@ -143,7 +140,9 @@ async fn main() -> Result<()> {
 
     if agents.is_empty() {
         anyhow::bail!(
-            "沒有找到任何 agent（agents_path 未設定或為空，且 config.toml 無啟用的 [[channels]]）",
+            "沒有找到任何 agent（agents_dir={} 為空，且 config.toml 無啟用的 [[channels]]）\n\
+             提示：使用 `haro init-agent <name>` 建立新的 agent",
+            agents_dir.display(),
         );
     }
 
