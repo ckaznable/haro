@@ -448,6 +448,22 @@ async fn handle_query(ctx: &MessageContext, question: &str, images: &[api::Image
         .collect::<Vec<_>>()
         .join("\n\n");
 
+    // 尚未蒸餾的 pending 訊息也加入上下文
+    let pending_texts = db::postgres::get_pending_texts(&ctx.pg, &ctx.agent_id)
+        .await
+        .unwrap_or_default();
+    let pending_section = if pending_texts.is_empty() {
+        String::new()
+    } else {
+        let items: String = pending_texts
+            .iter()
+            .enumerate()
+            .map(|(i, t)| format!("[待處理 {}] {}", i + 1, t))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        format!("\n\n## 待處理資料（尚未索引）\n{items}")
+    };
+
     let memo_section = if memo.is_empty() { "（空）".to_owned() } else { memo };
     let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %:z");
     let soul_section = if ctx.soul.is_empty() {
@@ -469,7 +485,7 @@ async fn handle_query(ctx: &MessageContext, question: &str, images: &[api::Image
          {soul_section}\
          {}\n\n\
          ## 備忘錄 (Scratchpad)\n{memo_section}\n\n\
-         ## 相關資料\n{context_str}\n\n\
+         ## 相關資料\n{context_str}{pending_section}\n\n\
          ## 指示\n\
          請根據上述資料回答使用者的問題。\n\
          如果資料中沒有相關內容，請如實告知。\n\

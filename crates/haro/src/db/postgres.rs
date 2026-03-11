@@ -235,6 +235,19 @@ pub async fn fetch_pending_ingest(pool: &PgPool, limit: i64) -> Result<Vec<Pendi
     Ok(rows)
 }
 
+/// 取得某 agent 的所有待處理文字（供查詢時補充上下文）
+pub async fn get_pending_texts(pool: &PgPool, agent_id: &str) -> Result<Vec<String>> {
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "SELECT text FROM pending_ingest WHERE agent_id = $1 ORDER BY created_at",
+    )
+    .bind(agent_id)
+    .fetch_all(pool)
+    .await
+    .context("讀取 pending_ingest 文字失敗")?;
+
+    Ok(rows.into_iter().map(|r| r.0).collect())
+}
+
 /// 刪除已處理的暫存項目
 pub async fn delete_pending_ingest(pool: &PgPool, ids: &[i64]) -> Result<()> {
     if ids.is_empty() {
