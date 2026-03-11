@@ -1,0 +1,60 @@
+[package]
+name = "haro"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Telegram Bot
+teloxide = { version = "0.17", features = ["macros"] }
+
+# PostgreSQL (sqlx)
+sqlx = { version = "0.8", features = [
+    "runtime-tokio",
+    "tls-rustls",
+    "postgres",
+    "uuid",
+    "chrono",
+    "migrate",
+] }
+
+# Qdrant vector DB (gRPC)
+qdrant-client = "1.12"
+
+# HTTP client (Gemini API)
+reqwest = { version = "0.13", features = ["json"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Config
+toml = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Async utilities
+futures = "0.3"
+
+# Encoding
+base64 = "0.22"
+
+# Text processing
+regex = "1"
+
+# Utilities
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "2"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+telegram-markdown-v2 = "0.2"
+directories = "6.0.0"
+
+[dev-dependencies]
+axum = "0.8"
+tempfile = "3"
