@@ -24,7 +24,7 @@ sqlx = { version = "0.8", features = [
 qdrant-client = "1.12"
 
 # HTTP client (Gemini API)
-reqwest = { version = "0.13", features = ["json"] }
+reqwest = { version = "0.13", features = ["json", "stream"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

@@ -50,6 +50,14 @@ impl Tool for FetchTool {
         }
     }
 
+    fn display_call(&self, args: &serde_json::Value) -> Option<String> {
+        let url = args
+            .get("url")
+            .and_then(|v| v.as_str())
+            .unwrap_or("(unknown)");
+        Some(format!("fetch {url}"))
+    }
+
     fn call(
         &self,
         args: serde_json::Value,

@@ -24,7 +24,7 @@ pub struct ImageData {
 }
 
 /// 收到的訊息（跨平台共用）
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct IncomingMessage {
     /// 來源頻道的唯一識別
     pub bot_id: String,
@@ -36,6 +36,8 @@ pub struct IncomingMessage {
     pub images: Vec<ImageData>,
     /// 用於回覆的 handle（平台各自實作）
     pub reply_handle: ReplyHandle,
+    /// 串流進度回報通道（LLM 中間輸出、工具呼叫描述）
+    pub progress: Option<crate::api::ProgressSender>,
 }
 
 /// 回覆用 handle，不同平台有不同的 variant

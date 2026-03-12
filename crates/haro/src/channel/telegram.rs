@@ -351,6 +351,16 @@ impl Channel for TelegramChannel {
                                 }
                             });
 
+                            // 建立串流進度通道
+                            let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+                            let progress_bot = bot.clone();
+                            let progress_chat_id = msg.chat.id;
+                            tokio::spawn(async move {
+                                while let Some(text) = progress_rx.recv().await {
+                                    send_reply(&progress_bot, progress_chat_id, &text).await;
+                                }
+                            });
+
                             let incoming = IncomingMessage {
                                 bot_id: String::new(),
                                 sender_id,
@@ -359,6 +369,7 @@ impl Channel for TelegramChannel {
                                 reply_handle: ReplyHandle::Telegram {
                                     chat_id: msg.chat.id.0,
                                 },
+                                progress: Some(progress_tx),
                             };
 
                             // 將 handler 作為獨立 task 執行，以便 /stop 可中斷

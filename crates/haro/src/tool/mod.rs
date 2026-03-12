@@ -25,6 +25,13 @@ pub trait Tool: Send + Sync {
         &self,
         args: serde_json::Value,
     ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + '_>>;
+
+    /// 工具被呼叫時的顯示文字（用於串流進度回報）
+    /// 回傳 None 表示使用預設格式「llm 呼叫了 {name}」
+    fn display_call(&self, args: &serde_json::Value) -> Option<String> {
+        let _ = args;
+        None
+    }
 }
 
 /// 依工具名稱建立工具實例
@@ -77,6 +84,17 @@ impl ToolRegistry {
 
     pub fn definitions(&self) -> Vec<ToolDef> {
         self.tools.iter().map(|t| t.definition()).collect()
+    }
+
+    /// 取得工具呼叫時的顯示文字
+    pub fn display_call(&self, name: &str, args: &serde_json::Value) -> String {
+        let inner = self
+            .tools
+            .iter()
+            .find(|t| t.definition().name == name)
+            .and_then(|t| t.display_call(args))
+            .unwrap_or_else(|| format!("llm 呼叫了 {name}"));
+        format!("⚡ `{inner}`")
     }
 
     pub async fn call(&self, name: &str, args: serde_json::Value) -> Result<String> {

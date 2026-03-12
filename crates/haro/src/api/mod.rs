@@ -7,6 +7,9 @@ use serde::Deserialize;
 use crate::models::DistilledData;
 use crate::tool::ToolRegistry;
 
+/// 串流進度回報通道（中間文字、工具呼叫描述等）
+pub type ProgressSender = tokio::sync::mpsc::UnboundedSender<String>;
+
 // ── Provider 抽象層 ──
 
 /// 圖片輸入（跨 provider 共用）
@@ -73,6 +76,7 @@ pub trait LlmProvider: Send + Sync {
         &self,
         params: GenerateParams<'_>,
         tools: &ToolRegistry,
+        progress: Option<&ProgressSender>,
     ) -> impl std::future::Future<Output = Result<GenerateResult>> + Send;
 }
 
@@ -205,6 +209,7 @@ pub async fn chat_with_tools(
     system: &str,
     user_query: &str,
     tools: &ToolRegistry,
+    progress: Option<&ProgressSender>,
 ) -> Result<GenerateResult> {
     llm.generate_with_tools(
         GenerateParams {
@@ -215,6 +220,7 @@ pub async fn chat_with_tools(
             temperature: 0.7,
         },
         tools,
+        progress,
     )
     .await
 }
@@ -226,6 +232,7 @@ pub async fn chat_with_images(
     user_query: &str,
     images: &[ImageInput],
     tools: &ToolRegistry,
+    progress: Option<&ProgressSender>,
 ) -> Result<GenerateResult> {
     llm.generate_with_tools(
         GenerateParams {
@@ -236,6 +243,7 @@ pub async fn chat_with_images(
             temperature: 0.7,
         },
         tools,
+        progress,
     )
     .await
 }

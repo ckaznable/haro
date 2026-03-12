@@ -139,7 +139,7 @@ pub fn spawn_all(
                             cron 表達式為標準 5 欄位格式（分 時 日 月 週）。\
                             executor 可選 worker（快速）、llm（主模型）、brain（最強）。\
                             完成後用簡短中文回報結果。";
-                        let result = api::chat_with_tools(worker.as_ref(), system, &args, &tools).await?;
+                        let result = api::chat_with_tools(worker.as_ref(), system, &args, &tools, None).await?;
                         Ok(result.text)
                     })
                 }),
@@ -172,7 +172,7 @@ pub fn spawn_all(
                             時間格式支援 ISO 8601 或 YYYY-MM-DD HH:MM。\
                             executor 可選 worker（快速）、llm（主模型）、brain（最強）。\
                             完成後用簡短中文回報結果。";
-                        let result = api::chat_with_tools(worker.as_ref(), system, &args, &tools).await?;
+                        let result = api::chat_with_tools(worker.as_ref(), system, &args, &tools, None).await?;
                         Ok(result.text)
                     })
                 }),
@@ -259,7 +259,7 @@ pub fn spawn_all(
                         if question.is_empty() {
                             return Ok("用法: /ask <問題>".into());
                         }
-                        handle_query(&ctx, question, &[]).await
+                        handle_query(&ctx, question, &[], None).await
                     })
                 }),
             );
@@ -320,7 +320,7 @@ pub fn spawn_all(
                             .await?
                         } else {
                             let tools = tool::build_registry(&cmd_tools, &pg, &aid);
-                            api::chat_with_tools(llm.as_ref(), &system, &user_message, &tools)
+                            api::chat_with_tools(llm.as_ref(), &system, &user_message, &tools, None)
                                 .await?
                         };
 
@@ -518,7 +518,7 @@ async fn handle_ingest(ctx: &MessageContext, text: &str, images: &[api::ImageInp
 }
 
 /// 查詢（不入庫）：檢索記憶 + LLM 回答
-async fn handle_query(ctx: &MessageContext, question: &str, images: &[api::ImageInput]) -> Result<String> {
+async fn handle_query(ctx: &MessageContext, question: &str, images: &[api::ImageInput], progress: Option<&api::ProgressSender>) -> Result<String> {
     let memo = db::postgres::get_scratchpad(&ctx.pg, &ctx.agent_id)
         .await?
         .unwrap_or_default();
@@ -605,7 +605,7 @@ async fn handle_query(ctx: &MessageContext, question: &str, images: &[api::Image
         ctx.prompt
     );
 
-    let result = api::chat_with_images(ctx.llm.as_ref(), &system, question, images, &tools).await?;
+    let result = api::chat_with_images(ctx.llm.as_ref(), &system, question, images, &tools, progress).await?;
 
     db::postgres::insert_token_usage(&ctx.pg, &ctx.agent_id, &ctx.llm_model, result.input_tokens, result.output_tokens).await?;
 
@@ -622,7 +622,7 @@ async fn handle_message(
     let image_meta = ImageMeta { file_ids: &file_ids, source_chat_id, source_message_id };
 
     // 1. 先查詢 + 回覆（LLM chat 端一律傳圖，不受 image_embed 影響）
-    let reply = handle_query(ctx, &msg.text, &images).await?;
+    let reply = handle_query(ctx, &msg.text, &images, msg.progress.as_ref()).await?;
 
     // 2. 入庫使用者訊息（image_embed 由 handle_ingest 內部判斷）
     let empty_meta = ImageMeta { file_ids: &[], source_chat_id: None, source_message_id: None };
@@ -731,7 +731,7 @@ async fn run_heartbeat(task: HeartbeatTask) -> Result<()> {
             task.agent_prompt, task.heartbeat_prompt
         );
 
-        let result = api::chat_with_tools(task.llm.as_ref(), &system, "心跳觸發，請執行任務。", &tools).await;
+        let result = api::chat_with_tools(task.llm.as_ref(), &system, "心跳觸發，請執行任務。", &tools, None).await;
 
         match result {
             Ok(r) => {
@@ -934,7 +934,7 @@ async fn run_cron(task: CronRunnerTask) -> Result<()> {
 
         let user_message = format!("{event_label}觸發，請執行：\n\n{prompt_text}");
 
-        let result = api::chat_with_tools(executor, &system, &user_message, &tools).await;
+        let result = api::chat_with_tools(executor, &system, &user_message, &tools, None).await;
 
         match result {
             Ok(r) => {

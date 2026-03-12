@@ -664,6 +664,7 @@ impl LlmProvider for GeminiProvider {
         &self,
         params: GenerateParams<'_>,
         tools: &ToolRegistry,
+        progress: Option<&super::ProgressSender>,
     ) -> Result<GenerateResult> {
         let defs = tools.definitions();
         if defs.is_empty() {
@@ -671,7 +672,7 @@ impl LlmProvider for GeminiProvider {
         }
 
         let url = format!(
-            "{}/{}:generateContent?key={}",
+            "{}/{}:streamGenerateContent?key={}&alt=sse",
             BASE_URL, self.model, self.api_key
         );
 
@@ -732,20 +733,11 @@ impl LlmProvider for GeminiProvider {
                 anyhow::bail!("Tool LLM API 錯誤 {status}: {text}");
             }
 
-            let result: ToolGenerateResponse =
-                resp.json().await.context("解析 Tool LLM 回應失敗")?;
+            // 解析 SSE 串流，累積所有 parts
+            let (parts, usage) = parse_sse_tool_stream(resp).await?;
 
-            let usage = result.usage_metadata.unwrap_or_default();
             total_input += usage.prompt_token_count;
             total_output += usage.candidates_token_count;
-
-            let parts = result
-                .candidates
-                .into_iter()
-                .next()
-                .context("Tool LLM 回應中沒有 candidate")?
-                .content
-                .parts;
 
             let mut fn_calls = Vec::new();
             let mut texts = Vec::new();
@@ -771,6 +763,18 @@ impl LlmProvider for GeminiProvider {
                     input_tokens: total_input,
                     output_tokens: total_output,
                 });
+            }
+
+            // 有工具呼叫：先將累積的文字透過 progress 送出，再送工具描述
+            if let Some(tx) = progress {
+                let buffered: String = texts.into_iter().collect();
+                if !buffered.is_empty() {
+                    let _ = tx.send(buffered);
+                }
+                for fc in &fn_calls {
+                    let desc = tools.display_call(&fc.name, &fc.args);
+                    let _ = tx.send(desc);
+                }
             }
 
             // 加入模型的所有 parts 到對話歷史（保留 thought + thought_signature）
@@ -806,4 +810,83 @@ impl LlmProvider for GeminiProvider {
 
         anyhow::bail!("工具呼叫超過最大輪數 ({MAX_ROUNDS})")
     }
+}
+
+/// 解析 Gemini SSE 串流回應，合併所有 chunk 的 parts 和 usage
+async fn parse_sse_tool_stream(
+    resp: reqwest::Response,
+) -> Result<(Vec<ToolResponsePart>, UsageMetadata)> {
+    use futures::StreamExt;
+
+    let mut merged_parts: Vec<ToolResponsePart> = Vec::new();
+    let mut usage = UsageMetadata::default();
+
+    let mut stream = resp.bytes_stream();
+    let mut buf = String::new();
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.context("SSE 串流讀取失敗")?;
+        buf.push_str(&String::from_utf8_lossy(&chunk));
+
+        // 處理 buf 中所有完整的 SSE 事件
+        while let Some(data_line) = extract_sse_data(&mut buf) {
+            let chunk_resp: ToolGenerateResponse = match serde_json::from_str(&data_line) {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!("SSE chunk 解析失敗，跳過: {e}");
+                    continue;
+                }
+            };
+
+            if let Some(u) = chunk_resp.usage_metadata {
+                usage = u;
+            }
+
+            for candidate in chunk_resp.candidates {
+                for part in candidate.content.parts {
+                    merge_sse_part(&mut merged_parts, part);
+                }
+            }
+        }
+    }
+
+    Ok((merged_parts, usage))
+}
+
+/// 從 SSE 緩衝區提取下一個完整的 data: 事件
+fn extract_sse_data(buf: &mut String) -> Option<String> {
+    // SSE 格式: "data: {...}\n\n"
+    let data_prefix = "data: ";
+    let start = buf.find(data_prefix)?;
+    let content_start = start + data_prefix.len();
+    // 找到事件結尾（雙換行）
+    let end = buf[content_start..].find("\n\n").or_else(|| buf[content_start..].find("\r\n\r\n"))?;
+    let data = buf[content_start..content_start + end].to_owned();
+    buf.drain(..content_start + end + 2); // +2 for \n\n
+    Some(data)
+}
+
+/// 合併 SSE chunk 的 part 到累積列表
+/// 純文字 part 會追加到最後一個同類 part，其他 part（function_call 等）直接推入
+fn merge_sse_part(parts: &mut Vec<ToolResponsePart>, part: ToolResponsePart) {
+    let is_thought = part.thought.unwrap_or(false);
+
+    // function_call / thought_signature 等結構性 part 直接追加
+    if part.function_call.is_some() || part.thought_signature.is_some() {
+        parts.push(part);
+        return;
+    }
+
+    // 文字 part：嘗試追加到最後一個同類（thought 屬性相同）的文字 part
+    if let Some(text) = &part.text {
+        if let Some(last) = parts.last_mut() {
+            let last_is_thought = last.thought.unwrap_or(false);
+            if last.text.is_some() && last.function_call.is_none() && last_is_thought == is_thought {
+                last.text.as_mut().unwrap().push_str(text);
+                return;
+            }
+        }
+    }
+
+    parts.push(part);
 }

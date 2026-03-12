@@ -68,6 +68,7 @@ impl Channel for CliChannel {
                     text,
                     images: vec![],
                     reply_handle: ReplyHandle::Cli,
+                    progress: None,
                 };
 
                 match handler(msg).await {

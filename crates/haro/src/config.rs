@@ -1,10 +1,15 @@
 use std::path::PathBuf;
+use std::sync::LazyLock;
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use tracing::info;
 
 use crate::agent::ChannelConfig;
+
+/// Haro XDG 目錄（全域快取，避免重複解析）
+static PROJECT_DIRS: LazyLock<Option<directories::ProjectDirs>> =
+    LazyLock::new(|| directories::ProjectDirs::from("", "", "haro"));
 
 /// 頂層設定，對應 config.toml
 #[derive(Debug, Clone, Deserialize)]
@@ -102,12 +107,14 @@ impl AppConfig {
     }
 
     /// 從 config.toml 載入，敏感欄位支援環境變數覆蓋
+    /// 搜尋順序：HARO_CONFIG 環境變數 > ./config.toml > XDG config dir
     pub fn load() -> Result<Self> {
-        let path = std::env::var("HARO_CONFIG").unwrap_or_else(|_| "config.toml".to_owned());
+        let path = Self::find_config_path()?;
+        info!("載入設定檔: {}", path.display());
         let content =
-            std::fs::read_to_string(&path).with_context(|| format!("無法讀取設定檔: {path}"))?;
+            std::fs::read_to_string(&path).with_context(|| format!("無法讀取設定檔: {}", path.display()))?;
         let mut cfg: Self =
-            toml::from_str(&content).with_context(|| format!("解析設定檔失敗: {path}"))?;
+            toml::from_str(&content).with_context(|| format!("解析設定檔失敗: {}", path.display()))?;
 
         // 環境變數覆蓋
         if let Ok(v) = std::env::var("DATABASE_URL") {
@@ -138,6 +145,32 @@ impl AppConfig {
         }
     }
 
+    /// 搜尋 config.toml 路徑：HARO_CONFIG > ./config.toml > XDG config dir
+    fn find_config_path() -> Result<PathBuf> {
+        // 1. 環境變數指定
+        if let Ok(v) = std::env::var("HARO_CONFIG") {
+            return Ok(PathBuf::from(v));
+        }
+
+        // 2. 當前工作目錄
+        let cwd = PathBuf::from("config.toml");
+        if cwd.exists() {
+            return Ok(cwd);
+        }
+
+        // 3. XDG config dir（Linux: ~/.config/haro/config.toml）
+        if let Some(dirs) = PROJECT_DIRS.as_ref() {
+            let xdg = dirs.config_dir().join("config.toml");
+            if xdg.exists() {
+                return Ok(xdg);
+            }
+        }
+
+        anyhow::bail!(
+            "找不到 config.toml（搜尋順序：$HARO_CONFIG → ./config.toml → ~/.config/haro/config.toml）"
+        )
+    }
+
     fn validate(&self) -> Result<()> {
         if self.embedding.api_key.is_empty() {
             anyhow::bail!(
@@ -160,7 +193,8 @@ impl AppConfig {
 
 /// 預設 agents 路徑：$XDG_DATA_HOME/haro/agents（Linux: ~/.local/share/haro/agents）
 pub fn default_agents_dir() -> PathBuf {
-    directories::ProjectDirs::from("", "", "haro")
+    PROJECT_DIRS
+        .as_ref()
         .map(|d| d.data_local_dir().join("agents"))
         .unwrap_or_else(|| PathBuf::from("agents"))
 }
