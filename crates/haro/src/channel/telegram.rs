@@ -61,11 +61,74 @@ fn parse_command(text: &str) -> Option<(&str, &str)> {
     Some((cmd, args.trim()))
 }
 
-/// 從 Telegram Message 取得文字（text 或 caption）
+/// 從 Telegram Message 取得文字（text 或 caption），轉發訊息加上來源標記，
+/// 回覆訊息時帶入被回覆的文字作為引用上下文
 fn extract_text(msg: &Message) -> Option<String> {
-    msg.text()
-        .or_else(|| msg.caption())
-        .map(str::to_owned)
+    let body = msg.text().or_else(|| msg.caption());
+
+    let mut parts = Vec::new();
+
+    // 轉發來源標記
+    let fwd = format_forward_origin(msg);
+    if !fwd.is_empty() {
+        parts.push(fwd);
+    }
+
+    // 被回覆訊息的文字（引用上下文）
+    if let Some(reply) = msg.reply_to_message() {
+        let reply_text = reply.text().or_else(|| reply.caption());
+        if let Some(rt) = reply_text {
+            let quoted: String = if rt.len() > 500 {
+                format!("{}…", &rt[..rt.floor_char_boundary(500)])
+            } else {
+                rt.to_owned()
+            };
+            parts.push(format!("[引用訊息] {quoted}"));
+        }
+    }
+
+    if let Some(b) = body {
+        parts.push(b.to_owned());
+    }
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n"))
+    }
+}
+
+/// 從轉發來源產生前綴標記（非轉發訊息回傳空字串）
+fn format_forward_origin(msg: &Message) -> String {
+    use teloxide::types::MessageOrigin;
+
+    let Some(origin) = msg.forward_origin() else {
+        return String::new();
+    };
+
+    match origin {
+        MessageOrigin::User { date, sender_user, .. } => {
+            let name = sender_user.username.as_ref()
+                .map(|u| format!("@{u}"))
+                .unwrap_or_else(|| sender_user.full_name());
+            format!("[轉發自 {name}，{date}]")
+        }
+        MessageOrigin::HiddenUser { date, sender_user_name, .. } => {
+            format!("[轉發自 {sender_user_name}，{date}]")
+        }
+        MessageOrigin::Chat { date, sender_chat, .. } => {
+            let name = sender_chat.username()
+                .map(|u| format!("@{u}"))
+                .unwrap_or_else(|| sender_chat.title().unwrap_or("未知群組").to_owned());
+            format!("[轉發自 {name}，{date}]")
+        }
+        MessageOrigin::Channel { date, chat, .. } => {
+            let name = chat.username()
+                .map(|u| format!("@{u}"))
+                .unwrap_or_else(|| chat.title().unwrap_or("未知頻道").to_owned());
+            format!("[轉發自頻道 {name}，{date}]")
+        }
+    }
 }
 
 /// 下載 Telegram 圖片（選最大尺寸），回傳 ImageData
@@ -95,8 +158,11 @@ async fn download_photo(bot: &Bot, msg: &Message) -> Option<ImageData> {
         "image/jpeg"
     };
 
+    // 縮放 + 格式轉換
+    let (mime, buf) = super::process_image(mime, buf);
+
     Some(ImageData {
-        mime_type: mime.to_owned(),
+        mime_type: mime,
         data: buf,
         file_id: Some(largest.file.id.to_string()),
         source_chat_id: Some(msg.chat.id.0),
@@ -211,15 +277,22 @@ impl Channel for TelegramChannel {
                                 return respond(());
                             }
 
-                            // 下載圖片（如有）
-                            let images = if msg.photo().is_some() {
-                                match download_photo(&bot, &msg).await {
-                                    Some(img) => vec![img],
-                                    None => vec![],
+                            // 下載圖片：當前訊息 + 被回覆訊息的圖片
+                            let mut images = Vec::new();
+                            // 被回覆訊息的圖片（放前面作為上下文）
+                            if let Some(reply) = msg.reply_to_message() {
+                                if reply.photo().is_some() {
+                                    if let Some(img) = download_photo(&bot, reply).await {
+                                        images.push(img);
+                                    }
                                 }
-                            } else {
-                                vec![]
-                            };
+                            }
+                            // 當前訊息的圖片
+                            if msg.photo().is_some() {
+                                if let Some(img) = download_photo(&bot, &msg).await {
+                                    images.push(img);
+                                }
+                            }
 
                             // 持續發送「輸入中…」狀態直到處理完成
                             let typing_bot = bot.clone();

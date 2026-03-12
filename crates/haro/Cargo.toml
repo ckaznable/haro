@@ -40,6 +40,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Async utilities
 futures = "0.3"
 
+# Image processing
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+
 # Encoding
 base64 = "0.22"
 

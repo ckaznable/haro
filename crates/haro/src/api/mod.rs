@@ -2,6 +2,8 @@ pub mod gemini;
 
 use anyhow::Result;
 
+use serde::Deserialize;
+
 use crate::models::DistilledData;
 use crate::tool::ToolRegistry;
 
@@ -103,9 +105,42 @@ If a term has a well-known Chinese translation, include BOTH forms.
 3. `original_text`: If the user provided text alongside the image, reproduce it verbatim. \
 If there was no text, provide a brief one-line description of the image content.";
 
+/// 容錯解析蒸餾 JSON：去除 markdown fences，忽略尾部多餘字元
+fn parse_distilled_json(raw: &str) -> serde_json::Result<DistilledData> {
+    let s = raw.trim();
+    // 去除 markdown code fences（模型偶爾會包裹）
+    let s = s
+        .strip_prefix("```json")
+        .or_else(|| s.strip_prefix("```"))
+        .unwrap_or(s);
+    let s = s.strip_suffix("```").unwrap_or(s).trim();
+    // 使用串流解析器：解析第一個完整 JSON 物件，忽略尾部多餘內容
+    let mut de = serde_json::Deserializer::from_str(s);
+    DistilledData::deserialize(&mut de)
+}
+
 /// 資料蒸餾：將原始文本（可選圖片）轉換為結構化數據，回傳 (蒸餾結果, token 用量)
-/// JSON 解析失敗時最多重試 3 次，全部失敗回傳 None
+/// JSON 解析失敗時最多重試 3 次，整體超過 60 秒視為失敗，全部失敗回傳 None
 pub async fn distill(
+    llm: &impl LlmProvider,
+    text: &str,
+    images: &[ImageInput],
+) -> Result<Option<(DistilledData, GenerateResult)>> {
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        distill_inner(llm, text, images),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => {
+            tracing::error!("蒸餾超時（60s），跳過向量入庫");
+            Ok(None)
+        }
+    }
+}
+
+async fn distill_inner(
     llm: &impl LlmProvider,
     text: &str,
     images: &[ImageInput],
@@ -136,7 +171,7 @@ pub async fn distill(
             })
             .await?;
 
-        match serde_json::from_str(result.text.trim()) {
+        match parse_distilled_json(&result.text) {
             Ok(data) => return Ok(Some((data, result))),
             Err(e) => {
                 tracing::warn!("蒸餾 JSON 解析失敗 ({}/{}): {e}", i + 1, MAX_RETRIES);

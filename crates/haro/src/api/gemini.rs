@@ -275,6 +275,8 @@ struct ToolRequestPart {
     #[serde(skip_serializing_if = "Option::is_none")]
     text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    inline_data: Option<InlineData>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     function_call: Option<FnCallData>,
     #[serde(skip_serializing_if = "Option::is_none")]
     function_response: Option<FnResponseData>,
@@ -286,13 +288,26 @@ struct ToolRequestPart {
 
 impl ToolRequestPart {
     fn text(s: String) -> Self {
-        Self { text: Some(s), function_call: None, function_response: None, thought: None, thought_signature: None }
+        Self { text: Some(s), inline_data: None, function_call: None, function_response: None, thought: None, thought_signature: None }
+    }
+    fn image(mime_type: &str, bytes: &[u8]) -> Self {
+        Self {
+            text: None,
+            inline_data: Some(InlineData {
+                mime_type: mime_type.to_owned(),
+                data: base64::engine::general_purpose::STANDARD.encode(bytes),
+            }),
+            function_call: None,
+            function_response: None,
+            thought: None,
+            thought_signature: None,
+        }
     }
     fn function_call(fc: FnCallData) -> Self {
-        Self { text: None, function_call: Some(fc), function_response: None, thought: None, thought_signature: None }
+        Self { text: None, inline_data: None, function_call: Some(fc), function_response: None, thought: None, thought_signature: None }
     }
     fn function_response(fr: FnResponseData) -> Self {
-        Self { text: None, function_call: None, function_response: Some(fr), thought: None, thought_signature: None }
+        Self { text: None, inline_data: None, function_call: None, function_response: Some(fr), thought: None, thought_signature: None }
     }
 }
 
@@ -675,9 +690,14 @@ impl LlmProvider for GeminiProvider {
             }],
         });
 
+        let mut user_parts = vec![ToolRequestPart::text(params.user_message.to_owned())];
+        for img in params.images {
+            user_parts.push(ToolRequestPart::image(&img.mime_type, &img.data));
+        }
+
         let mut contents = vec![ToolMessage {
             role: "user".into(),
-            parts: vec![ToolRequestPart::text(params.user_message.to_owned())],
+            parts: user_parts,
         }];
 
         const MAX_ROUNDS: usize = 5;
@@ -760,6 +780,7 @@ impl LlmProvider for GeminiProvider {
                     .into_iter()
                     .map(|p| ToolRequestPart {
                         text: p.text,
+                        inline_data: None,
                         function_call: p.function_call,
                         function_response: None,
                         thought: p.thought,

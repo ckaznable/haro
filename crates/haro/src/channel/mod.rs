@@ -3,10 +3,12 @@ pub mod telegram;
 
 use std::collections::HashMap;
 use std::future::Future;
+use std::io::Cursor;
 use std::pin::Pin;
 use std::sync::Arc;
 
 use anyhow::Result;
+use image::ImageReader;
 
 /// 圖片資料（跨平台共用）
 #[derive(Debug, Clone)]
@@ -143,6 +145,74 @@ pub trait Channel: Send + Sync {
         handler: MessageHandler,
         commands: Arc<CommandRegistry>,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send>>;
+}
+
+/// 允許直接傳遞的 MIME type（不需格式轉換）
+const ALLOWED_MIME_TYPES: &[&str] = &[
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+    "image/heic",
+    "image/heif",
+];
+
+/// 最大長邊像素
+const MAX_DIMENSION: u32 = 1536;
+
+/// 處理圖片：超過 1536px 則等比縮放，非允許格式則轉為 JPEG。
+/// 回傳 (mime_type, data)。無法解碼時原樣回傳。
+pub fn process_image(mime_type: &str, data: Vec<u8>) -> (String, Vec<u8>) {
+    // HEIC/HEIF 無法由 image crate 解碼，直接放行
+    if mime_type == "image/heic" || mime_type == "image/heif" {
+        return (mime_type.to_owned(), data);
+    }
+
+    let reader = match ImageReader::new(Cursor::new(&data)).with_guessed_format() {
+        Ok(r) => r,
+        Err(_) => return (mime_type.to_owned(), data),
+    };
+
+    let mut img = match reader.decode() {
+        Ok(i) => i,
+        Err(_) => return (mime_type.to_owned(), data),
+    };
+
+    // 等比縮放
+    let (w, h) = (img.width(), img.height());
+    let max_side = w.max(h);
+    if max_side > MAX_DIMENSION {
+        let new_w = (w as f64 * MAX_DIMENSION as f64 / max_side as f64).round() as u32;
+        let new_h = (h as f64 * MAX_DIMENSION as f64 / max_side as f64).round() as u32;
+        img = img.resize_exact(new_w, new_h, image::imageops::FilterType::Lanczos3);
+        tracing::info!(original = %format!("{w}x{h}"), resized = %format!("{new_w}x{new_h}"), "圖片縮放");
+    }
+
+    // 決定輸出格式
+    let need_convert = !ALLOWED_MIME_TYPES.contains(&mime_type);
+    let resized = max_side > MAX_DIMENSION;
+
+    if !need_convert && !resized {
+        return (mime_type.to_owned(), data);
+    }
+
+    let (out_format, out_mime) = if need_convert {
+        (image::ImageFormat::Jpeg, "image/jpeg")
+    } else if mime_type == "image/png" {
+        (image::ImageFormat::Png, "image/png")
+    } else if mime_type == "image/webp" {
+        (image::ImageFormat::WebP, "image/webp")
+    } else {
+        (image::ImageFormat::Jpeg, "image/jpeg")
+    };
+
+    let mut buf = Cursor::new(Vec::new());
+    match img.write_to(&mut buf, out_format) {
+        Ok(()) => (out_mime.to_owned(), buf.into_inner()),
+        Err(e) => {
+            tracing::warn!("圖片編碼失敗，使用原始資料: {e}");
+            (mime_type.to_owned(), data)
+        }
+    }
 }
 
 #[cfg(test)]

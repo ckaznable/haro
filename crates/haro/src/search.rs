@@ -78,8 +78,8 @@ pub async fn ingest(
         }
     }
 
-    // 1. Worker 模型資料蒸餾（含圖片）
-    let distilled = api::distill(worker, text, images).await?;
+    // 1. Worker 模型資料蒸餾（純文字，不帶圖片）
+    let distilled = api::distill(worker, text, &[]).await?;
 
     let Some((data, usage)) = distilled else {
         // 蒸餾失敗，僅存原始訊息到 PG

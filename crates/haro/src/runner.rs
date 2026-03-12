@@ -51,7 +51,7 @@ pub fn spawn_all(
             .channels
             .iter()
             .filter_map(|ch| ch.notifier())
-            .map(|n| Arc::from(n))
+            .map(Arc::from)
             .collect();
 
         // 啟動 LLM 心跳任務
@@ -500,7 +500,7 @@ async fn handle_query(ctx: &MessageContext, question: &str, images: &[api::Image
     Ok(result.text)
 }
 
-/// 處理單則訊息（chat 模式：入庫 + 回覆）
+/// 處理單則訊息（chat 模式：先回覆，再入庫使用者訊息與 LLM 回覆）
 async fn handle_message(
     ctx: &MessageContext,
     msg: &crate::channel::IncomingMessage,
@@ -509,11 +509,17 @@ async fn handle_message(
     let (file_ids, source_chat_id, source_message_id) = extract_image_meta(&msg.images);
     let image_meta = ImageMeta { file_ids: &file_ids, source_chat_id, source_message_id };
 
-    // 入庫（image_embed 由 handle_ingest 內部判斷）
+    // 1. 先查詢 + 回覆（LLM chat 端一律傳圖，不受 image_embed 影響）
+    let reply = handle_query(ctx, &msg.text, &images).await?;
+
+    // 2. 入庫使用者訊息（image_embed 由 handle_ingest 內部判斷）
+    let empty_meta = ImageMeta { file_ids: &[], source_chat_id: None, source_message_id: None };
     handle_ingest(ctx, &msg.text, &images, &image_meta).await?;
 
-    // 查詢 + 回覆（LLM chat 端一律傳圖，不受 image_embed 影響）
-    handle_query(ctx, &msg.text, &images).await.map(Some)
+    // 3. 入庫 LLM 回覆
+    handle_ingest(ctx, &reply, &[], &empty_meta).await?;
+
+    Ok(Some(reply))
 }
 
 const HEARTBEAT_TRIAGE_PROMPT: &str = "\
@@ -606,7 +612,8 @@ async fn run_heartbeat(task: HeartbeatTask) -> Result<()> {
              ## 備忘錄 (Scratchpad)\n{memo}\n\n\
              ## 指示\n\
              這是一個定期心跳喚醒。請根據以下心跳指示執行任務。\n\
-             如果有重要的事情需要記住，請使用 save_memo 工具儲存到備忘錄中。{notify_instruction}\n\n\
+             如果有重要的事情需要記住，請使用 save_memo 工具儲存到備忘錄中。\n\
+             需要回報的事項必須使用 send_message 工具發送到頻道，不要只在內部處理。{notify_instruction}\n\n\
              ## 心跳指示\n{}",
             task.agent_prompt, task.heartbeat_prompt
         );
