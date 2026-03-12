@@ -96,6 +96,14 @@ pub async fn ingest(
         ));
     };
 
+    // dense_summary 為空時跳過 embedding，僅存 PG
+    if data.dense_summary.trim().is_empty() {
+        let token_count = worker.count_tokens(&data.original_text).await.unwrap_or(0);
+        let inserted = db::postgres::insert_message(pg, bot_id, &data, token_count, image_meta).await?;
+        info!(id = %inserted.id, bot_id, "dense_summary 為空，跳過向量入庫");
+        return Ok((inserted.id, usage));
+    }
+
     // 2. 對 dense_summary 計算向量（如有圖片則使用多模態 embedding）
     let (vector, token_count) = tokio::try_join!(
         embedder.embed_multimodal(&data.dense_summary, images),

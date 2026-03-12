@@ -86,9 +86,9 @@ fn build_multimodal_parts(text: &str, images: &[ImageInput]) -> Vec<ContentPart>
     for img in images {
         parts.push(ContentPart::image(&img.mime_type, &img.data));
     }
-    // 至少要有一個 part
+    // 至少要有一個 part（空字串會被 Gemini API 拒絕）
     if parts.is_empty() {
-        parts.push(ContentPart::text(""));
+        parts.push(ContentPart::text("(empty)"));
     }
     parts
 }
