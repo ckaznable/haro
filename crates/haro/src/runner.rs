@@ -90,6 +90,13 @@ pub fn spawn_all(
         let mut cmd_registry = CommandRegistry::new();
 
         cmd_registry.register(
+            "stop",
+            "中斷正在處理的任務",
+            "/stop",
+            Arc::new(|_sender, _args| Box::pin(async { Ok("此指令由頻道直接處理。".into()) })),
+        );
+
+        cmd_registry.register(
             "ping",
             "檢查機器人是否在線",
             "/ping",
@@ -152,6 +159,7 @@ pub fn spawn_all(
                 llm_model: cfg.llm.model.clone(),
                 image_embed: cfg.embedding.image_embed,
                 skills_path: skills_path.clone(),
+                agent_path: agent_path.clone(),
             });
             cmd_registry.register(
                 "ask",
@@ -286,6 +294,7 @@ pub fn spawn_all(
                 llm_model: cfg.llm.model.clone(),
                 image_embed: cfg.embedding.image_embed,
                 skills_path: skills_path.clone(),
+                agent_path: agent_path.clone(),
             });
 
             let mode = agent_mode.clone();
@@ -386,6 +395,8 @@ struct MessageContext {
     image_embed: bool,
     /// Agent 的 skills 目錄路徑（None = 無 skills）
     skills_path: Option<std::path::PathBuf>,
+    /// Agent 的根目錄路徑（None = 無 heartbeat 工具）
+    agent_path: Option<std::path::PathBuf>,
 }
 
 /// 將 channel::ImageData 轉換為 api::ImageInput
@@ -432,6 +443,13 @@ async fn handle_query(ctx: &MessageContext, question: &str, images: &[api::Image
         tools.register(t);
     }
     tools.register(tool::fetch::tool());
+
+    // 註冊 heartbeat 工具（如有 agent 目錄）
+    if let Some(ref ap) = ctx.agent_path {
+        for t in tool::heartbeat::tools(ap.clone()) {
+            tools.register(t);
+        }
+    }
 
     // 註冊 skills 工具（如有 skills 目錄）
     let has_skills = ctx.skills_path.is_some();
@@ -489,7 +507,8 @@ async fn handle_query(ctx: &MessageContext, question: &str, images: &[api::Image
          ## 指示\n\
          請根據上述資料回答使用者的問題。\n\
          如果資料中沒有相關內容，請如實告知。\n\
-         如果有重要的事情需要記住，請使用 save_memo 工具儲存。{skills_instruction}",
+         如果有重要的事情需要記住，請使用 save_memo 工具儲存。\n\
+         備忘錄只用於紀錄固定且明確的資訊（例如偏好、規則、待辦事項），不要紀錄曾經做過的事情。{skills_instruction}",
         ctx.prompt
     );
 
@@ -613,6 +632,7 @@ async fn run_heartbeat(task: HeartbeatTask) -> Result<()> {
              ## 指示\n\
              這是一個定期心跳喚醒。請根據以下心跳指示執行任務。\n\
              如果有重要的事情需要記住，請使用 save_memo 工具儲存到備忘錄中。\n\
+             備忘錄只用於紀錄固定且明確的資訊（例如偏好、規則、待辦事項），不要紀錄曾經做過的事情。\n\
              需要回報的事項必須使用 send_message 工具發送到頻道，不要只在內部處理。{notify_instruction}\n\n\
              ## 心跳指示\n{}",
             task.agent_prompt, task.heartbeat_prompt

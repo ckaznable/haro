@@ -4,23 +4,38 @@ use std::sync::Arc;
 use anyhow::Result;
 use teloxide::net::Download;
 use teloxide::prelude::*;
-use teloxide::types::{ChatAction, ParseMode, ReactionType};
+use teloxide::types::{BotCommand, ChatAction, ParseMode, ReactionType};
+use tokio::task::AbortHandle;
 use tracing::{error, info, warn};
 
 use super::{Channel, CommandRegistry, ImageData, IncomingMessage, MessageHandler, Notifier, ReplyHandle};
+
+/// 活躍任務的 abort handles（handler + typing）
+type ActiveTask = Arc<std::sync::Mutex<Option<(AbortHandle, AbortHandle)>>>;
+
+/// 動態收集的已知 chat ID（從收到的訊息中學習）
+type KnownChatIds = Arc<std::sync::Mutex<HashSet<i64>>>;
 
 /// Telegram Bot 頻道實作
 pub struct TelegramChannel {
     bot: Bot,
     allowed_users: Arc<HashSet<String>>,
+    /// 動態收集的 chat_id（配合 @username 使用，訊息進來時自動記錄）
+    known_chat_ids: KnownChatIds,
 }
 
 impl TelegramChannel {
     /// `allowed_users` 可放 user ID（數字）或 @username，空 = 不限制
     pub fn new(bot_token: &str, allowed_users: &[String]) -> Self {
+        // 預先填入 allowed_users 中的純數字 ID
+        let pre_known: HashSet<i64> = allowed_users
+            .iter()
+            .filter_map(|u| u.parse::<i64>().ok())
+            .collect();
         Self {
             bot: Bot::new(bot_token),
             allowed_users: Arc::new(allowed_users.iter().cloned().collect()),
+            known_chat_ids: Arc::new(std::sync::Mutex::new(pre_known)),
         }
     }
 }
@@ -175,16 +190,23 @@ fn has_content(msg: &Message) -> bool {
     msg.text().is_some() || msg.caption().is_some() || msg.photo().is_some()
 }
 
-/// Telegram 主動通知器
+/// Telegram 主動通知器（動態讀取已知 chat_id）
 pub struct TelegramNotifier {
     bot: Bot,
-    chat_ids: Vec<ChatId>,
+    known_chat_ids: KnownChatIds,
 }
 
 impl Notifier for TelegramNotifier {
     fn send<'a>(&'a self, message: &'a str) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
         Box::pin(async move {
-            for &chat_id in &self.chat_ids {
+            let chat_ids: Vec<ChatId> = self
+                .known_chat_ids
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|&id| ChatId(id))
+                .collect();
+            for chat_id in chat_ids {
                 send_reply(&self.bot, chat_id, message).await;
             }
             Ok(())
@@ -194,21 +216,9 @@ impl Notifier for TelegramNotifier {
 
 impl Channel for TelegramChannel {
     fn notifier(&self) -> Option<Box<dyn Notifier>> {
-        // allowed_users 中的純數字 ID 可作為私聊 chat_id
-        let chat_ids: Vec<ChatId> = self
-            .allowed_users
-            .iter()
-            .filter_map(|u| u.parse::<i64>().ok())
-            .map(ChatId)
-            .collect();
-
-        if chat_ids.is_empty() {
-            return None;
-        }
-
         Some(Box::new(TelegramNotifier {
             bot: self.bot.clone(),
-            chat_ids,
+            known_chat_ids: Arc::clone(&self.known_chat_ids),
         }))
     }
 
@@ -220,6 +230,18 @@ impl Channel for TelegramChannel {
         Box::pin(async move {
             let bot = self.bot;
             let allowed_users = self.allowed_users;
+            let known_chat_ids = self.known_chat_ids;
+            let active_task: ActiveTask = Arc::new(std::sync::Mutex::new(None));
+
+            // 將已註冊的指令推送到 Telegram 介面
+            let bot_commands: Vec<BotCommand> = commands
+                .command_list()
+                .into_iter()
+                .map(|(name, desc)| BotCommand::new(name, desc))
+                .collect();
+            if let Err(e) = bot.set_my_commands(bot_commands).await {
+                warn!("設定 Telegram 指令選單失敗: {e}");
+            }
 
             info!("Telegram Bot 開始監聽");
 
@@ -231,6 +253,8 @@ impl Channel for TelegramChannel {
                         let handler = Arc::clone(&handler);
                         let allowed = Arc::clone(&allowed_users);
                         let commands = Arc::clone(&commands);
+                        let active_task = Arc::clone(&active_task);
+                        let known_chat_ids = Arc::clone(&known_chat_ids);
                         async move {
                             // 檢查允許名單
                             if !allowed.is_empty() {
@@ -252,6 +276,9 @@ impl Channel for TelegramChannel {
                                 }
                             }
 
+                            // 記錄已驗證使用者的 chat_id（供 notifier 使用）
+                            known_chat_ids.lock().unwrap().insert(msg.chat.id.0);
+
                             let sender_id = msg
                                 .from
                                 .as_ref()
@@ -259,6 +286,24 @@ impl Channel for TelegramChannel {
                                 .unwrap_or_default();
 
                             let text = extract_text(&msg).unwrap_or_default();
+
+                            // /stop：中斷正在處理的任務（在指令註冊表之前攔截）
+                            if msg.photo().is_none() {
+                                if let Some((cmd, _)) = parse_command(&text) {
+                                    if cmd == "stop" {
+                                        let taken = active_task.lock().unwrap().take();
+                                        if let Some((h, t)) = taken {
+                                            h.abort();
+                                            t.abort();
+                                            info!("使用者中斷了正在處理的任務");
+                                            send_reply(&bot, msg.chat.id, "已中斷處理。").await;
+                                        } else {
+                                            send_reply(&bot, msg.chat.id, "目前沒有正在處理的任務。").await;
+                                        }
+                                        return respond(());
+                                    }
+                                }
+                            }
 
                             // 檢查是否為已註冊的指令（僅純文字訊息）
                             if msg.photo().is_none()
@@ -316,8 +361,41 @@ impl Channel for TelegramChannel {
                                 },
                             };
 
-                            let result = handler(incoming).await;
+                            // 將 handler 作為獨立 task 執行，以便 /stop 可中斷
+                            let handler_task = tokio::spawn(async move {
+                                handler(incoming).await
+                            });
+
+                            // 儲存 abort handles
+                            {
+                                let mut guard = active_task.lock().unwrap();
+                                *guard = Some((handler_task.abort_handle(), typing_handle.abort_handle()));
+                            }
+
+                            let result = match handler_task.await {
+                                Ok(r) => r,
+                                Err(e) if e.is_cancelled() => {
+                                    // 被 /stop 中斷
+                                    typing_handle.abort();
+                                    return respond(());
+                                }
+                                Err(e) => {
+                                    typing_handle.abort();
+                                    error!("Handler panicked: {e}");
+                                    let _ = bot
+                                        .send_message(msg.chat.id, "內部錯誤")
+                                        .await;
+                                    return respond(());
+                                }
+                            };
+
                             typing_handle.abort();
+
+                            // 清除 active task
+                            {
+                                let mut guard = active_task.lock().unwrap();
+                                *guard = None;
+                            }
 
                             match result {
                                 Ok(Some(reply)) => {

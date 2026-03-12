@@ -1,4 +1,5 @@
 pub mod fetch;
+pub mod heartbeat;
 pub mod notify;
 pub mod scratchpad;
 pub mod skills;

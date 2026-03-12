@@ -113,6 +113,18 @@ impl CommandRegistry {
         self.commands.get(name).map(|e| &e.handler)
     }
 
+    /// 回傳所有指令的 (name, description)，按註冊順序
+    pub fn command_list(&self) -> Vec<(&str, &str)> {
+        self.order
+            .iter()
+            .filter_map(|name| {
+                self.commands
+                    .get(name)
+                    .map(|e| (name.as_str(), e.description.as_str()))
+            })
+            .collect()
+    }
+
     /// 產生 help 文字，列出所有已註冊指令
     pub fn help_text(&self) -> String {
         self.order
