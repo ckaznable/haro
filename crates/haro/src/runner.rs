@@ -1,8 +1,9 @@
+use std::str::FromStr;
 use std::sync::Arc;
 
 use anyhow::Result;
 use tokio::task::JoinHandle;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::agent::{Agent, AgentMode};
 use crate::api::{self, LlmProvider};
@@ -106,6 +107,92 @@ pub fn spawn_all(
         // 心跳查看/編輯指令
         if let Some(ref apath) = agent_path {
             register_heartbeat_commands(&mut cmd_registry, apath);
+        }
+
+        // /cron 指令 + 背景 cron runner
+        if let Some(ref apath) = agent_path {
+            let cron_path = apath.join("cron.toml");
+            let cp = cron_path.clone();
+            let cron_worker = Arc::clone(&res.worker);
+            cmd_registry.register(
+                "cron",
+                "管理排程任務（支援自然語言）",
+                "/cron [list|add|remove|enable|disable|<自然語言>]",
+                Arc::new(move |_sender, args| {
+                    let cp = cp.clone();
+                    let worker = Arc::clone(&cron_worker);
+                    Box::pin(async move {
+                        // 先嘗試結構化指令
+                        let result = tool::cron::handle_slash_command(&cp, &args);
+                        match result {
+                            // 回傳「用法」表示格式不對，改用 worker 解讀
+                            Ok(ref text) if text.starts_with("用法:") => {}
+                            other => return other,
+                        }
+                        // fallback: 用 worker + cron 工具解讀自然語言
+                        let mut tools = tool::ToolRegistry::new();
+                        for t in tool::cron::tools(cp.parent().unwrap().to_path_buf()) {
+                            tools.register(t);
+                        }
+                        let system = "你是一個排程任務管理助手。\
+                            使用者想管理 cron 排程任務，請根據使用者的描述使用工具完成操作。\
+                            cron 表達式為標準 5 欄位格式（分 時 日 月 週）。\
+                            executor 可選 worker（快速）、llm（主模型）、brain（最強）。\
+                            完成後用簡短中文回報結果。";
+                        let result = api::chat_with_tools(worker.as_ref(), system, &args, &tools).await?;
+                        Ok(result.text)
+                    })
+                }),
+            );
+
+            // /task 指令
+            let tasks_path = apath.join("tasks.toml");
+            let tp = tasks_path.clone();
+            let task_worker = Arc::clone(&res.worker);
+            cmd_registry.register(
+                "task",
+                "管理一次性排程任務（支援自然語言）",
+                "/task [list|add|remove|<自然語言>]",
+                Arc::new(move |_sender, args| {
+                    let tp = tp.clone();
+                    let worker = Arc::clone(&task_worker);
+                    Box::pin(async move {
+                        let result = tool::task::handle_slash_command(&tp, &args);
+                        match result {
+                            Ok(ref text) if text.starts_with("用法:") => {}
+                            other => return other,
+                        }
+                        // fallback: 用 worker + task 工具解讀自然語言
+                        let mut tools = tool::ToolRegistry::new();
+                        for t in tool::task::tools(tp.parent().unwrap().to_path_buf()) {
+                            tools.register(t);
+                        }
+                        let system = "你是一個排程任務管理助手。\
+                            使用者想管理一次性排程任務，請根據使用者的描述使用工具完成操作。\
+                            時間格式支援 ISO 8601 或 YYYY-MM-DD HH:MM。\
+                            executor 可選 worker（快速）、llm（主模型）、brain（最強）。\
+                            完成後用簡短中文回報結果。";
+                        let result = api::chat_with_tools(worker.as_ref(), system, &args, &tools).await?;
+                        Ok(result.text)
+                    })
+                }),
+            );
+
+            info!(agent_id = %agent_id, "啟動 Cron 排程任務");
+            handles.push(tokio::spawn(run_cron(CronRunnerTask {
+                pg: Arc::clone(&res.pg),
+                worker: Arc::clone(&res.worker),
+                llm: Arc::clone(&res.llm),
+                brain: Arc::clone(&res.brain),
+                agent_id: agent_id.clone(),
+                agent_prompt: agent_prompt.clone(),
+                cron_path,
+                tasks_path,
+                llm_model: cfg.llm.model.clone(),
+                brain_model: brain_model.clone(),
+                worker_model: cfg.worker.model.clone(),
+                notifiers: notifiers.clone(),
+            })));
         }
 
         // Skills 目錄（存在才啟用）
@@ -444,9 +531,15 @@ async fn handle_query(ctx: &MessageContext, question: &str, images: &[api::Image
     }
     tools.register(tool::fetch::tool());
 
-    // 註冊 heartbeat 工具（如有 agent 目錄）
+    // 註冊 heartbeat + cron 工具（如有 agent 目錄）
     if let Some(ref ap) = ctx.agent_path {
         for t in tool::heartbeat::tools(ap.clone()) {
+            tools.register(t);
+        }
+        for t in tool::cron::tools(ap.clone()) {
+            tools.register(t);
+        }
+        for t in tool::task::tools(ap.clone()) {
             tools.register(t);
         }
     }
@@ -654,6 +747,216 @@ async fn run_heartbeat(task: HeartbeatTask) -> Result<()> {
             }
             Err(e) => {
                 error!(agent_id = %task.agent_id, "心跳執行失敗: {e:#}");
+            }
+        }
+    }
+}
+
+// ── Cron 排程任務 ──
+
+/// Cron 排程任務設定
+struct CronRunnerTask {
+    pg: Arc<sqlx::PgPool>,
+    worker: Arc<api::gemini::GeminiProvider>,
+    llm: Arc<api::gemini::GeminiProvider>,
+    brain: Arc<api::gemini::GeminiProvider>,
+    agent_id: String,
+    agent_prompt: String,
+    cron_path: std::path::PathBuf,
+    tasks_path: std::path::PathBuf,
+    llm_model: String,
+    brain_model: String,
+    worker_model: String,
+    notifiers: Vec<Arc<dyn Notifier>>,
+}
+
+/// 下一個要執行的事件類型
+enum NextEvent {
+    /// 週期性 cron job
+    CronJob { id: String },
+    /// 一次性排程任務
+    ScheduledTask { id: String },
+}
+
+/// Cron 排程背景迴圈：載入 cron.toml，計算下次觸發時間，到時執行
+async fn run_cron(task: CronRunnerTask) -> Result<()> {
+    use chrono::Local;
+    use tool::cron::{load_config, Executor};
+
+    // 初始等待 10 秒，讓其他服務先啟動
+    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+
+    loop {
+        // 每次迴圈重新載入 cron.toml（支援熱更新）
+        let config = match load_config(&task.cron_path) {
+            Ok(c) => c,
+            Err(e) => {
+                error!(agent_id = %task.agent_id, "載入 cron.toml 失敗: {e:#}");
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                continue;
+            }
+        };
+
+        let now = Local::now();
+        let mut earliest_event: Option<NextEvent> = None;
+        let mut earliest_time: Option<chrono::DateTime<Local>> = None;
+
+        // 檢查 cron jobs
+        for job in config.jobs.iter().filter(|j| j.enabled) {
+            let full_expr = format!("0 {} *", job.cron);
+            let schedule = match cron::Schedule::from_str(&full_expr) {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!(agent_id = %task.agent_id, job_id = %job.id, "cron 表達式無效，跳過: {e}");
+                    continue;
+                }
+            };
+
+            if let Some(next) = schedule.upcoming(Local).next() {
+                if earliest_time.is_none() || next < earliest_time.unwrap() {
+                    earliest_time = Some(next);
+                    earliest_event = Some(NextEvent::CronJob { id: job.id.clone() });
+                }
+            }
+        }
+
+        // 檢查一次性排程任務（tasks.toml）
+        let tasks_config = tool::task::load_config(&task.tasks_path).unwrap_or_default();
+        for st in &tasks_config.tasks {
+            if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&st.run_at) {
+                let dt_local = dt.with_timezone(&Local);
+                if dt_local <= now {
+                    // 已過期但未執行，立即執行
+                    earliest_time = Some(now);
+                    earliest_event = Some(NextEvent::ScheduledTask { id: st.id.clone() });
+                    break; // 過期任務優先
+                } else if earliest_time.is_none() || dt_local < earliest_time.unwrap() {
+                    earliest_time = Some(dt_local);
+                    earliest_event = Some(NextEvent::ScheduledTask { id: st.id.clone() });
+                }
+            } else {
+                warn!(agent_id = %task.agent_id, task_id = %st.id, "一次性任務時間格式無效，跳過");
+            }
+        }
+
+        let (Some(next_time), Some(event)) = (earliest_time, earliest_event) else {
+            // 沒有任何排程，等 60 秒後再檢查
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            continue;
+        };
+
+        let event_id = match &event {
+            NextEvent::CronJob { id } => id.as_str(),
+            NextEvent::ScheduledTask { id } => id.as_str(),
+        };
+
+        let wait_duration = (next_time - now).to_std().unwrap_or(std::time::Duration::ZERO);
+        if !wait_duration.is_zero() {
+            info!(
+                agent_id = %task.agent_id,
+                next_event = %event_id,
+                next_time = %next_time.format("%H:%M:%S"),
+                wait_secs = wait_duration.as_secs(),
+                "排程等待下次觸發"
+            );
+            tokio::time::sleep(wait_duration).await;
+        }
+
+        // 重新載入設定（等待期間可能有變更）
+        let config = match load_config(&task.cron_path) {
+            Ok(c) => c,
+            Err(e) => {
+                error!(agent_id = %task.agent_id, "載入 cron.toml 失敗: {e:#}");
+                continue;
+            }
+        };
+
+        // 取得 executor + prompt
+        let (executor_type, prompt_text, event_label) = match &event {
+            NextEvent::CronJob { id } => {
+                let Some(job) = config.jobs.iter().find(|j| j.id == *id && j.enabled) else {
+                    info!(agent_id = %task.agent_id, job_id = %id, "任務已被移除或停用，跳過");
+                    continue;
+                };
+                (job.executor.clone(), job.prompt.clone(), format!("cron「{id}」"))
+            }
+            NextEvent::ScheduledTask { id } => {
+                let tasks_config = tool::task::load_config(&task.tasks_path).unwrap_or_default();
+                let Some(st) = tasks_config.tasks.iter().find(|t| t.id == *id) else {
+                    info!(agent_id = %task.agent_id, task_id = %id, "任務已被移除，跳過");
+                    continue;
+                };
+                (st.executor.clone(), st.prompt.clone(), format!("一次性任務「{id}」"))
+            }
+        };
+
+        info!(agent_id = %task.agent_id, event = %event_label, executor = %executor_type, "觸發排程任務");
+
+        let (executor, model_name): (&api::gemini::GeminiProvider, &str) = match executor_type {
+            Executor::Worker => (task.worker.as_ref(), &task.worker_model),
+            Executor::Llm => (task.llm.as_ref(), &task.llm_model),
+            Executor::Brain => (task.brain.as_ref(), &task.brain_model),
+        };
+
+        // 建立工具
+        let mut tools = tool::ToolRegistry::new();
+        for t in tool::scratchpad::tools(Arc::clone(&task.pg), task.agent_id.clone()) {
+            tools.register(t);
+        }
+        tools.register(tool::fetch::tool());
+        if !task.notifiers.is_empty() {
+            tools.register(tool::notify::tool(task.notifiers.clone()));
+        }
+
+        let memo = db::postgres::get_scratchpad(&task.pg, &task.agent_id)
+            .await
+            .unwrap_or(None)
+            .unwrap_or_default();
+
+        let now = Local::now().format("%Y-%m-%d %H:%M:%S %:z");
+        let notify_instruction = if task.notifiers.is_empty() {
+            ""
+        } else {
+            "\n如果需要回報結果，請使用 send_message 工具發送到頻道。"
+        };
+
+        let system = format!(
+            "你是一個 AI 助手，正在執行排程任務。\n\n\
+             目前時間：{now}\n\n\
+             {}\n\n\
+             ## 備忘錄 (Scratchpad)\n{memo}\n\n\
+             ## 指示\n\
+             這是一個排程任務，請根據以下提示詞執行。\n\
+             如果有重要的事情需要記住，請使用 save_memo 工具儲存。\n\
+             需要回報的事項必須使用 send_message 工具發送到頻道。{notify_instruction}",
+            task.agent_prompt
+        );
+
+        let user_message = format!("{event_label}觸發，請執行：\n\n{prompt_text}");
+
+        let result = api::chat_with_tools(executor, &system, &user_message, &tools).await;
+
+        match result {
+            Ok(r) => {
+                let _ = db::postgres::insert_token_usage(
+                    &task.pg,
+                    &task.agent_id,
+                    model_name,
+                    r.input_tokens,
+                    r.output_tokens,
+                )
+                .await;
+                info!(agent_id = %task.agent_id, event = %event_label, "排程任務完成");
+            }
+            Err(e) => {
+                error!(agent_id = %task.agent_id, event = %event_label, "排程任務失敗: {e:#}");
+            }
+        }
+
+        // 一次性任務完成後從 tasks.toml 中刪除
+        if let NextEvent::ScheduledTask { id } = &event {
+            if let Err(e) = tool::task::remove_task(&task.tasks_path, id) {
+                error!(agent_id = %task.agent_id, task_id = %id, "刪除已完成任務失敗: {e:#}");
             }
         }
     }

@@ -32,6 +32,8 @@ enum Commands {
     Init,
     /// 建立新的 agent 目錄
     InitAgent(cli::InitAgentArgs),
+    /// 為現有 agent 新增設定檔（heartbeat / cron）
+    AddConfig(cli::AddConfigArgs),
     /// CLI 測試模式（直接與 LLM 互動）
     Cli,
 }
@@ -49,6 +51,7 @@ async fn main() -> Result<()> {
     match args.command {
         Some(Commands::Init) => return config::AppConfig::init(),
         Some(Commands::InitAgent(init_args)) => return cli::init_agent(init_args),
+        Some(Commands::AddConfig(args)) => return cli::add_config(args),
         Some(Commands::Cli) => {
             let cfg = config::AppConfig::load()?;
             return run_cli(&cfg).await;

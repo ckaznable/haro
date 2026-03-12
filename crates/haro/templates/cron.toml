@@ -1,0 +1,17 @@
+# Cron 排程任務設定
+# cron 欄位格式：分 時 日 月 週（標準 5 欄位）
+# executor：worker（快速/便宜）、llm（主模型）、brain（最強模型）
+
+# [[jobs]]
+# id = "morning-brief"
+# cron = "0 8 * * *"
+# prompt = "查看備忘錄中的待辦事項，發送今日提醒到頻道"
+# executor = "llm"
+# enabled = true
+
+# [[jobs]]
+# id = "weekly-report"
+# cron = "0 18 * * 5"
+# prompt = "總結本週的重要事件並發送到頻道"
+# executor = "brain"
+# enabled = true

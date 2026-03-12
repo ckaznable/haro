@@ -1,8 +1,10 @@
+pub mod cron;
 pub mod fetch;
 pub mod heartbeat;
 pub mod notify;
 pub mod scratchpad;
 pub mod skills;
+pub mod task;
 
 use std::future::Future;
 use std::pin::Pin;

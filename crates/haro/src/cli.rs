@@ -16,6 +16,16 @@ pub struct InitAgentArgs {
     pub base: Option<PathBuf>,
 }
 
+#[derive(Args)]
+pub struct AddConfigArgs {
+    /// Agent ID（即目錄名稱），未提供則互動詢問
+    pub name: Option<String>,
+
+    /// agents 根目錄（預設 ~/.local/share/haro/agents）
+    #[arg(long)]
+    pub base: Option<PathBuf>,
+}
+
 pub fn init_agent(args: InitAgentArgs) -> Result<()> {
     eprintln!("=== Haro Agent 建立精靈 ===\n");
 
@@ -55,6 +65,15 @@ pub fn init_agent(args: InitAgentArgs) -> Result<()> {
     let heartbeat = ask_md("HEARTBEAT.md（心跳提示詞）")?;
     let brain_heartbeat = ask_md("BRAIN_HEARTBEAT.md（大腦心跳提示詞）")?;
 
+    // 4. Cron 排程
+    eprintln!();
+    let create_cron = ask_default("是否建立範例 cron.toml？(y/n)", "n")?;
+    let cron_content = if create_cron.starts_with('y') || create_cron.starts_with('Y') {
+        include_str!("../templates/cron.toml").to_owned()
+    } else {
+        String::new()
+    };
+
     // 建立目錄和檔案
     std::fs::create_dir_all(&agent_dir)
         .with_context(|| format!("無法建立目錄: {}", agent_dir.display()))?;
@@ -91,10 +110,115 @@ pub fn init_agent(args: InitAgentArgs) -> Result<()> {
         write_file(&agent_dir, "BRAIN_HEARTBEAT.md", &brain_heartbeat)?;
         files.push("BRAIN_HEARTBEAT.md");
     }
+    if !cron_content.is_empty() {
+        write_file(&agent_dir, "cron.toml", &cron_content)?;
+        files.push("cron.toml");
+    }
 
     eprintln!("\n✅ Agent「{name}」已建立: {}", agent_dir.display());
     for f in &files {
         eprintln!("   {f}");
+    }
+
+    Ok(())
+}
+
+pub fn add_config(args: AddConfigArgs) -> Result<()> {
+    eprintln!("=== 為現有 Agent 新增設定檔 ===\n");
+
+    let base = args.base.unwrap_or_else(|| {
+        config::AppConfig::load()
+            .ok()
+            .map(|c| c.agents_dir())
+            .unwrap_or_else(config::default_agents_dir)
+    });
+
+    let name = match args.name {
+        Some(n) => n,
+        None => {
+            // 列出現有 agents
+            let mut agents: Vec<String> = Vec::new();
+            if let Ok(entries) = std::fs::read_dir(&base) {
+                for entry in entries.flatten() {
+                    if entry.path().is_dir() {
+                        if let Some(name) = entry.file_name().to_str() {
+                            agents.push(name.to_owned());
+                        }
+                    }
+                }
+            }
+            agents.sort();
+            if agents.is_empty() {
+                anyhow::bail!("在 {} 下找不到任何 agent", base.display());
+            }
+            eprintln!("可用的 Agents:");
+            for (i, a) in agents.iter().enumerate() {
+                eprintln!("  {}) {a}", i + 1);
+            }
+            let choice = ask("選擇 Agent（輸入編號或名稱）")?;
+            if let Ok(idx) = choice.parse::<usize>() {
+                if idx >= 1 && idx <= agents.len() {
+                    agents[idx - 1].clone()
+                } else {
+                    anyhow::bail!("無效的編號: {idx}");
+                }
+            } else {
+                choice
+            }
+        }
+    };
+
+    let agent_dir = base.join(&name);
+    if !agent_dir.exists() {
+        anyhow::bail!("Agent 目錄不存在: {}", agent_dir.display());
+    }
+
+    let mut created = Vec::new();
+
+    // HEARTBEAT.md
+    let hb_path = agent_dir.join("HEARTBEAT.md");
+    if hb_path.exists() {
+        eprintln!("HEARTBEAT.md 已存在，跳過");
+    } else {
+        let content = ask_md("HEARTBEAT.md（心跳提示詞）")?;
+        if !content.is_empty() {
+            write_file(&agent_dir, "HEARTBEAT.md", &content)?;
+            created.push("HEARTBEAT.md");
+        }
+    }
+
+    // BRAIN_HEARTBEAT.md
+    let bh_path = agent_dir.join("BRAIN_HEARTBEAT.md");
+    if bh_path.exists() {
+        eprintln!("BRAIN_HEARTBEAT.md 已存在，跳過");
+    } else {
+        let content = ask_md("BRAIN_HEARTBEAT.md（大腦心跳提示詞）")?;
+        if !content.is_empty() {
+            write_file(&agent_dir, "BRAIN_HEARTBEAT.md", &content)?;
+            created.push("BRAIN_HEARTBEAT.md");
+        }
+    }
+
+    // cron.toml
+    let cron_path = agent_dir.join("cron.toml");
+    if cron_path.exists() {
+        eprintln!("cron.toml 已存在，跳過");
+    } else {
+        let create_cron = ask_default("是否建立範例 cron.toml？(y/n)", "n")?;
+        if create_cron.starts_with('y') || create_cron.starts_with('Y') {
+            let content = include_str!("../templates/cron.toml");
+            write_file(&agent_dir, "cron.toml", content)?;
+            created.push("cron.toml");
+        }
+    }
+
+    if created.is_empty() {
+        eprintln!("\n沒有建立任何新檔案。");
+    } else {
+        eprintln!("\n✅ 已為 Agent「{name}」建立:");
+        for f in &created {
+            eprintln!("   {f}");
+        }
     }
 
     Ok(())

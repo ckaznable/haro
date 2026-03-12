@@ -46,6 +46,9 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 # Encoding
 base64 = "0.22"
 
+# Cron scheduling
+cron = "0.15"
+
 # Text processing
 regex = "1"
 
