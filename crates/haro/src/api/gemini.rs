@@ -19,6 +19,7 @@ pub struct GeminiProvider {
     dimension: Option<u64>,
     thinking_budget: Option<i32>,
     thinking_level: Option<String>,
+    grounding: bool,
 }
 
 // ── 共用 Part 型別（支援文字 + 圖片） ──
@@ -182,6 +183,8 @@ struct GenerateRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     system_instruction: Option<SystemInstruction>,
     generation_config: GenConfig,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<serde_json::Value>>,
 }
 
 #[derive(Serialize)]
@@ -260,7 +263,7 @@ struct ToolGenerateRequest<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     system_instruction: Option<&'a ToolInstruction>,
     generation_config: GenConfig,
-    tools: [ToolSpec<'a>; 1],
+    tools: Vec<serde_json::Value>,
 }
 
 #[derive(Serialize)]
@@ -388,6 +391,7 @@ impl GeminiProvider {
         dimension: Option<u64>,
         thinking_budget: Option<i32>,
         thinking_level: Option<&str>,
+        grounding: bool,
     ) -> Self {
         Self {
             http: Client::new(),
@@ -396,7 +400,69 @@ impl GeminiProvider {
             dimension,
             thinking_budget,
             thinking_level: thinking_level.map(str::to_owned),
+            grounding,
         }
+    }
+
+    /// 是否啟用 grounding
+    pub fn grounding(&self) -> bool {
+        self.grounding
+    }
+
+    /// 使用 Google Search grounding 進行搜尋，回傳搜尋結果文字
+    pub async fn grounded_search(&self, query: &str) -> Result<String> {
+        let url = format!(
+            "{}/{}:generateContent?key={}",
+            BASE_URL, self.model, self.api_key
+        );
+
+        let body = GenerateRequest {
+            contents: [MultimodalMessage {
+                role: "user",
+                parts: vec![ContentPart::text(query)],
+            }],
+            system_instruction: Some(SystemInstruction {
+                parts: vec![ContentPart::text(
+                    "你是搜尋助手。使用 Google Search 如實搜尋使用者的查詢，\
+                     將搜尋結果整理後直接輸出，不要加入自己的推測或額外解釋。",
+                )],
+            }),
+            generation_config: GenConfig {
+                response_mime_type: None,
+                temperature: 0.2,
+                thinking_config: None,
+            },
+            tools: Some(vec![serde_json::json!({"google_search": {}})]),
+        };
+
+        let resp = self
+            .http
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .context("Grounding 搜尋請求失敗")?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            anyhow::bail!("Grounding 搜尋錯誤 {status}: {text}");
+        }
+
+        let result: GenerateResponse = resp.json().await.context("解析 Grounding 搜尋回應失敗")?;
+
+        result
+            .candidates
+            .into_iter()
+            .next()
+            .context("Grounding 搜尋回應中沒有 candidate")?
+            .content
+            .parts
+            .into_iter()
+            .filter(|p| !p.thought.unwrap_or(false))
+            .filter_map(|p| p.text)
+            .next()
+            .context("Grounding 搜尋回應中沒有文字")
     }
 
     fn build_thinking_config(&self) -> Option<ThinkingConfigPayload> {
@@ -621,6 +687,7 @@ impl LlmProvider for GeminiProvider {
                 temperature: params.temperature,
                 thinking_config: self.build_thinking_config(),
             },
+            tools: None,
         };
 
         let resp = self
@@ -706,6 +773,11 @@ impl LlmProvider for GeminiProvider {
         let mut total_output = 0i32;
 
         for _ in 0..MAX_ROUNDS {
+            // Gemini 不支援 google_search 與 function calling 同時使用
+            let tools_array = vec![
+                serde_json::to_value(ToolSpec { function_declarations: &fn_decls }).unwrap(),
+            ];
+
             let body = ToolGenerateRequest {
                 contents: &contents,
                 system_instruction: instruction.as_ref(),
@@ -714,9 +786,7 @@ impl LlmProvider for GeminiProvider {
                     temperature: params.temperature,
                     thinking_config: self.build_thinking_config(),
                 },
-                tools: [ToolSpec {
-                    function_declarations: &fn_decls,
-                }],
+                tools: tools_array,
             };
 
             let resp = self

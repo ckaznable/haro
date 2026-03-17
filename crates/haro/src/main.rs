@@ -75,6 +75,7 @@ async fn main() -> Result<()> {
         cfg.embedding.dimension,
         cfg.embedding.thinking_budget,
         cfg.embedding.thinking_level.as_deref(),
+        cfg.embedding.grounding,
     );
     let llm = api::gemini::GeminiProvider::new(
         &cfg.llm.api_key,
@@ -82,6 +83,7 @@ async fn main() -> Result<()> {
         cfg.llm.dimension,
         cfg.llm.thinking_budget,
         cfg.llm.thinking_level.as_deref(),
+        cfg.llm.grounding,
     );
     let worker = api::gemini::GeminiProvider::new(
         &cfg.worker.api_key,
@@ -89,6 +91,7 @@ async fn main() -> Result<()> {
         cfg.worker.dimension,
         cfg.worker.thinking_budget,
         cfg.worker.thinking_level.as_deref(),
+        cfg.worker.grounding,
     );
 
     info!(
@@ -107,6 +110,7 @@ async fn main() -> Result<()> {
         brain_cfg.dimension,
         brain_cfg.thinking_budget,
         brain_cfg.thinking_level.as_deref(),
+        brain_cfg.grounding,
     ));
 
     let res = runner::SharedResources {
@@ -173,6 +177,7 @@ async fn run_cli(cfg: &config::AppConfig) -> Result<()> {
         cfg.llm.dimension,
         cfg.llm.thinking_budget,
         cfg.llm.thinking_level.as_deref(),
+        cfg.llm.grounding,
     ));
 
     info!("CLI 測試模式 — model={}", cfg.llm.model);

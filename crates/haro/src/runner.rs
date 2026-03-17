@@ -530,6 +530,9 @@ async fn handle_query(ctx: &MessageContext, question: &str, images: &[api::Image
         tools.register(t);
     }
     tools.register(tool::fetch::tool());
+    if ctx.llm.grounding() {
+        tools.register(tool::search::tool(Arc::clone(&ctx.llm)));
+    }
 
     // 註冊 heartbeat + cron 工具（如有 agent 目錄）
     if let Some(ref ap) = ctx.agent_path {

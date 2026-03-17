@@ -3,6 +3,7 @@ pub mod fetch;
 pub mod heartbeat;
 pub mod notify;
 pub mod scratchpad;
+pub mod search;
 pub mod skills;
 pub mod task;
 

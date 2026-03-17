@@ -72,6 +72,9 @@ pub struct ProviderConfig {
     pub thinking_budget: Option<i32>,
     /// Gemini 3.x: thinking 等級 ("minimal" / "low" / "medium" / "high")
     pub thinking_level: Option<String>,
+    /// 啟用 Gemini Google Search grounding
+    #[serde(default)]
+    pub grounding: bool,
 }
 
 impl ProviderConfig {
