@@ -56,6 +56,7 @@ impl Default for QdrantConfig {
 
 /// 通用 Provider 設定（embedding / llm / worker 共用結構）
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
 pub struct ProviderConfig {
     pub provider: String,
     #[serde(default)]

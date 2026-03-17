@@ -143,29 +143,6 @@ pub async fn search_bm25(
         .collect())
 }
 
-// ── 近期歷史 ──
-
-/// 取得最近 N 筆原始訊息及其 token 數量（時間倒序）
-pub async fn get_recent_messages(
-    pool: &PgPool,
-    bot_id: &str,
-    limit: i64,
-) -> Result<Vec<(String, i32)>> {
-    let rows: Vec<(String, i32)> = sqlx::query_as(
-        "SELECT original_text, token_count FROM messages \
-         WHERE bot_id = $1 \
-         ORDER BY created_at DESC \
-         LIMIT $2",
-    )
-    .bind(bot_id)
-    .bind(limit)
-    .fetch_all(pool)
-    .await
-    .context("讀取近期訊息失敗")?;
-
-    Ok(rows)
-}
-
 // ── Token 用量 ──
 
 /// 記錄一次 LLM 呼叫的 token 用量

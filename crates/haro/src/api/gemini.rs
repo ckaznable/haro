@@ -306,9 +306,6 @@ impl ToolRequestPart {
             thought_signature: None,
         }
     }
-    fn function_call(fc: FnCallData) -> Self {
-        Self { text: None, inline_data: None, function_call: Some(fc), function_response: None, thought: None, thought_signature: None }
-    }
     fn function_response(fr: FnResponseData) -> Self {
         Self { text: None, inline_data: None, function_call: None, function_response: Some(fr), thought: None, thought_signature: None }
     }

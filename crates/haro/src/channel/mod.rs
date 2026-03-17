@@ -25,6 +25,7 @@ pub struct ImageData {
 
 /// 收到的訊息（跨平台共用）
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct IncomingMessage {
     /// 來源頻道的唯一識別
     pub bot_id: String,
@@ -42,6 +43,7 @@ pub struct IncomingMessage {
 
 /// 回覆用 handle，不同平台有不同的 variant
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum ReplyHandle {
     Telegram { chat_id: i64 },
     Cli,

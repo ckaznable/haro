@@ -187,22 +187,6 @@ async fn distill_inner(
     Ok(None)
 }
 
-/// 生成最終對話回答
-pub async fn chat(
-    llm: &impl LlmProvider,
-    system: &str,
-    user_query: &str,
-) -> Result<GenerateResult> {
-    llm.generate(GenerateParams {
-        system: Some(system),
-        user_message: user_query,
-        images: &[],
-        json_mode: false,
-        temperature: 0.7,
-    })
-    .await
-}
-
 /// 帶工具呼叫的對話回答
 pub async fn chat_with_tools(
     llm: &impl LlmProvider,

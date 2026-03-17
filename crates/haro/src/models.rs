@@ -20,6 +20,7 @@ pub struct SearchHit {
 
 /// RRF 融合排序後的最終結果
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct RankedResult {
     pub id: Uuid,
     pub score: f64,
