@@ -386,12 +386,14 @@ pub fn spawn_all(
 
             let mode = agent_mode.clone();
             let queue = ingest_queue.clone();
+            let ch_notifiers = notifiers.clone();
             let handler: MessageHandler = Arc::new(move |msg| {
                 let ctx = Arc::clone(&msg_ctx);
                 let mode = mode.clone();
                 let queue = queue.clone();
+                let notifiers = ch_notifiers.clone();
                 Box::pin(async move {
-                    match mode {
+                    let result = match mode {
                         AgentMode::Chat => handle_message(&ctx, &msg).await,
                         AgentMode::Ingest => {
                             if let Some(q) = &queue {
@@ -404,7 +406,20 @@ pub fn spawn_all(
                             }
                             Ok(None)
                         }
+                    };
+
+                    // 偵測 API 額度耗盡，廣播通知所有頻道
+                    if let Err(ref e) = result {
+                        let msg = format!("{e:#}");
+                        if msg.contains("429") && msg.contains("RESOURCE_EXHAUSTED") {
+                            let notice = "⚠️ API 額度已用盡，服務暫時無法使用。";
+                            for n in &notifiers {
+                                let _ = n.send(notice).await;
+                            }
+                        }
                     }
+
+                    result
                 })
             });
 

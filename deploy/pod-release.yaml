@@ -1,0 +1,78 @@
+# Release 部署：haro binary + PostgreSQL + Qdrant 三合一 Pod
+#
+# 事前準備：
+#   1. ./scripts/build-release.sh
+#   2. podman build -t haro-postgres -f deploy/Containerfile.postgres deploy/
+#   3. podman build -t haro-release -f deploy/Containerfile.haro .
+#   4. podman play kube deploy/pod-release.yaml
+#
+# config.toml 放在 ~/.config/haro/config.toml（XDG config dir）
+# agents 放在 ~/.local/share/haro/agents/（XDG data dir）
+apiVersion: v1
+kind: Pod
+metadata:
+  name: haro
+  labels:
+    app: haro
+spec:
+  containers:
+    - name: postgres
+      image: localhost/haro-postgres:latest
+      env:
+        - name: POSTGRES_USER
+          value: haro
+        - name: POSTGRES_PASSWORD
+          value: haro_dev_password
+        - name: POSTGRES_DB
+          value: haro
+        - name: PGDATA
+          value: /var/lib/postgresql/data/pgdata
+      ports:
+        - containerPort: 5432
+          hostPort: 5432
+      volumeMounts:
+        - name: pg-data
+          mountPath: /var/lib/postgresql/data
+
+    - name: qdrant
+      image: docker.io/qdrant/qdrant:latest
+      ports:
+        - containerPort: 6333
+          hostPort: 6333
+        - containerPort: 6334
+          hostPort: 6334
+      volumeMounts:
+        - name: qdrant-data
+          mountPath: /qdrant/storage
+
+    - name: haro
+      image: localhost/haro-release:latest
+      env:
+        - name: DATABASE_URL
+          value: postgres://haro:haro_dev_password@localhost:5432/haro
+        - name: QDRANT_URL
+          value: http://localhost:6334
+      volumeMounts:
+        - name: haro-config
+          mountPath: /root/.config/haro
+          readOnly: true
+        - name: haro-data
+          mountPath: /root/.local/share/haro
+
+  volumes:
+    - name: pg-data
+      hostPath:
+        path: /home/john/.haro/postgres
+        type: DirectoryOrCreate
+    - name: qdrant-data
+      hostPath:
+        path: /home/john/.haro/qdrant
+        type: DirectoryOrCreate
+    - name: haro-config
+      hostPath:
+        path: /home/john/.config/haro
+        type: DirectoryOrCreate
+    - name: haro-data
+      hostPath:
+        path: /home/john/.local/share/haro
+        type: DirectoryOrCreate
