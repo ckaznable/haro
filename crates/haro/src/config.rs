@@ -30,6 +30,8 @@ pub struct AppConfig {
     /// 心跳間隔（秒），預設 3600
     #[serde(default = "default_heartbeat_interval")]
     pub heartbeat_interval: u64,
+    /// SearXNG 搜尋引擎 base URL（設定後啟用搜尋工具）
+    pub searxng_url: Option<String>,
 }
 
 fn default_heartbeat_interval() -> u64 {

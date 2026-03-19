@@ -247,6 +247,7 @@ pub fn spawn_all(
                 image_embed: cfg.embedding.image_embed,
                 skills_path: skills_path.clone(),
                 agent_path: agent_path.clone(),
+                searxng_url: cfg.searxng_url.clone(),
             });
             cmd_registry.register(
                 "ask",
@@ -382,6 +383,7 @@ pub fn spawn_all(
                 image_embed: cfg.embedding.image_embed,
                 skills_path: skills_path.clone(),
                 agent_path: agent_path.clone(),
+                searxng_url: cfg.searxng_url.clone(),
             });
 
             let mode = agent_mode.clone();
@@ -499,6 +501,8 @@ struct MessageContext {
     skills_path: Option<std::path::PathBuf>,
     /// Agent 的根目錄路徑（None = 無 heartbeat 工具）
     agent_path: Option<std::path::PathBuf>,
+    /// SearXNG base URL（None = 不啟用）
+    searxng_url: Option<String>,
 }
 
 /// 將 channel::ImageData 轉換為 api::ImageInput
@@ -547,6 +551,9 @@ async fn handle_query(ctx: &MessageContext, question: &str, images: &[api::Image
     tools.register(tool::fetch::tool());
     if ctx.llm.grounding() {
         tools.register(tool::search::tool(Arc::clone(&ctx.llm)));
+    }
+    if let Some(ref url) = ctx.searxng_url {
+        tools.register(tool::searxng::tool(url.clone()));
     }
 
     // 註冊 heartbeat + cron 工具（如有 agent 目錄）
