@@ -18,4 +18,4 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && ldconfig
 
-COPY init-extensions.sql /docker-entrypoint-initdb.d/
+COPY deploy/init-extensions.sql /docker-entrypoint-initdb.d/
