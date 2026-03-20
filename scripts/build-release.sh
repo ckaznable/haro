@@ -61,6 +61,6 @@ if [[ "$BUILD_IMAGE" == true ]]; then
     podman build \
         --build-arg "BIN_PATH=${OUT_DIR}/haro" \
         -t haro-release \
-        -f deploy/Containerfile.haro .
+        -f ./Containerfile.haro .
     echo "==> 映像建置完成: localhost/haro-release:latest"
 fi
