@@ -68,6 +68,7 @@ pub fn spawn_all(
                 interval_secs: heartbeat_interval,
                 llm_model: cfg.llm.model.clone(),
                 notifiers: notifiers.clone(),
+                searxng_url: cfg.searxng_url.clone(),
             })));
         }
 
@@ -84,6 +85,7 @@ pub fn spawn_all(
                 interval_secs: heartbeat_interval,
                 llm_model: brain_model.clone(),
                 notifiers: notifiers.clone(),
+                searxng_url: cfg.searxng_url.clone(),
             })));
         }
 
@@ -192,6 +194,7 @@ pub fn spawn_all(
                 brain_model: brain_model.clone(),
                 worker_model: cfg.worker.model.clone(),
                 notifiers: notifiers.clone(),
+                searxng_url: cfg.searxng_url.clone(),
             })));
         }
 
@@ -676,6 +679,7 @@ struct HeartbeatTask {
     interval_secs: u64,
     llm_model: String,
     notifiers: Vec<Arc<dyn Notifier>>,
+    searxng_url: Option<String>,
 }
 
 /// 心跳任務：定期喚醒 worker 判斷是否需要呼叫 LLM 執行任務
@@ -732,6 +736,12 @@ async fn run_heartbeat(task: HeartbeatTask) -> Result<()> {
             tools.register(t);
         }
         tools.register(tool::fetch::tool());
+        if task.llm.grounding() {
+            tools.register(tool::search::tool(Arc::clone(&task.llm)));
+        }
+        if let Some(ref url) = task.searxng_url {
+            tools.register(tool::searxng::tool(url.clone()));
+        }
         if !task.notifiers.is_empty() {
             tools.register(tool::notify::tool(task.notifiers.clone()));
         }
@@ -793,6 +803,7 @@ struct CronRunnerTask {
     brain_model: String,
     worker_model: String,
     notifiers: Vec<Arc<dyn Notifier>>,
+    searxng_url: Option<String>,
 }
 
 /// 下一個要執行的事件類型
@@ -929,6 +940,17 @@ async fn run_cron(task: CronRunnerTask) -> Result<()> {
             tools.register(t);
         }
         tools.register(tool::fetch::tool());
+        if executor.grounding() {
+            let executor_arc = match executor_type {
+                Executor::Worker => Arc::clone(&task.worker),
+                Executor::Llm => Arc::clone(&task.llm),
+                Executor::Brain => Arc::clone(&task.brain),
+            };
+            tools.register(tool::search::tool(executor_arc));
+        }
+        if let Some(ref url) = task.searxng_url {
+            tools.register(tool::searxng::tool(url.clone()));
+        }
         if !task.notifiers.is_empty() {
             tools.register(tool::notify::tool(task.notifiers.clone()));
         }
