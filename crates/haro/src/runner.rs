@@ -111,6 +111,12 @@ pub fn spawn_all(
             register_heartbeat_commands(&mut cmd_registry, apath);
         }
 
+        // Skills 目錄（存在才啟用）
+        let skills_path = agent_path
+            .as_ref()
+            .map(|p| p.join("skills"))
+            .filter(|p| p.is_dir());
+
         // /cron 指令 + 背景 cron runner
         if let Some(ref apath) = agent_path {
             let cron_path = apath.join("cron.toml");
@@ -195,14 +201,9 @@ pub fn spawn_all(
                 worker_model: cfg.worker.model.clone(),
                 notifiers: notifiers.clone(),
                 searxng_url: cfg.searxng_url.clone(),
+                skills_path: skills_path.clone(),
             })));
         }
-
-        // Skills 目錄（存在才啟用）
-        let skills_path = agent_path
-            .as_ref()
-            .map(|p| p.join("skills"))
-            .filter(|p| p.is_dir());
 
         // /skills 指令：列出可用 skills
         if let Some(ref sp) = skills_path {
@@ -804,6 +805,7 @@ struct CronRunnerTask {
     worker_model: String,
     notifiers: Vec<Arc<dyn Notifier>>,
     searxng_url: Option<String>,
+    skills_path: Option<std::path::PathBuf>,
 }
 
 /// 下一個要執行的事件類型
@@ -950,6 +952,11 @@ async fn run_cron(task: CronRunnerTask) -> Result<()> {
         }
         if let Some(ref url) = task.searxng_url {
             tools.register(tool::searxng::tool(url.clone()));
+        }
+        if let Some(ref sp) = task.skills_path {
+            for t in tool::skills::tools(sp.clone()) {
+                tools.register(t);
+            }
         }
         if !task.notifiers.is_empty() {
             tools.register(tool::notify::tool(task.notifiers.clone()));
