@@ -69,6 +69,7 @@ pub fn spawn_all(
                 llm_model: cfg.llm.model.clone(),
                 notifiers: notifiers.clone(),
                 searxng_url: cfg.searxng_url.clone(),
+                agent_path: agent_path.clone(),
             })));
         }
 
@@ -86,6 +87,7 @@ pub fn spawn_all(
                 llm_model: brain_model.clone(),
                 notifiers: notifiers.clone(),
                 searxng_url: cfg.searxng_url.clone(),
+                agent_path: agent_path.clone(),
             })));
         }
 
@@ -681,6 +683,7 @@ struct HeartbeatTask {
     llm_model: String,
     notifiers: Vec<Arc<dyn Notifier>>,
     searxng_url: Option<String>,
+    agent_path: Option<std::path::PathBuf>,
 }
 
 /// 心跳任務：定期喚醒 worker 判斷是否需要呼叫 LLM 執行任務
@@ -742,6 +745,11 @@ async fn run_heartbeat(task: HeartbeatTask) -> Result<()> {
         }
         if let Some(ref url) = task.searxng_url {
             tools.register(tool::searxng::tool(url.clone()));
+        }
+        if let Some(ref ap) = task.agent_path {
+            for t in tool::heartbeat::tools(ap.clone()) {
+                tools.register(t);
+            }
         }
         if !task.notifiers.is_empty() {
             tools.register(tool::notify::tool(task.notifiers.clone()));
