@@ -143,6 +143,36 @@ pub async fn search_bm25(
         .collect())
 }
 
+// ── 對話歷史 ──
+
+/// 取得近期訊息作為對話歷史，累積 token 數不超過 max_tokens
+/// 回傳按時間正序（舊→新），每筆為 original_text
+pub async fn get_history(
+    pool: &PgPool,
+    bot_id: &str,
+    max_tokens: i32,
+) -> Result<Vec<String>> {
+    // 用視窗函式累積 token，在 SQL 層就截斷
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "SELECT original_text FROM ( \
+             SELECT original_text, created_at, \
+                    SUM(token_count) OVER (ORDER BY created_at DESC) AS cumulative_tokens \
+             FROM messages \
+             WHERE bot_id = $1 AND token_count > 0 \
+             ORDER BY created_at DESC \
+         ) sub \
+         WHERE cumulative_tokens <= $2 \
+         ORDER BY created_at ASC",
+    )
+    .bind(bot_id)
+    .bind(max_tokens)
+    .fetch_all(pool)
+    .await
+    .context("讀取對話歷史失敗")?;
+
+    Ok(rows.into_iter().map(|(t,)| t).collect())
+}
+
 // ── Token 用量 ──
 
 /// 記錄一次 LLM 呼叫的 token 用量

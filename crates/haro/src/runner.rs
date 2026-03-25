@@ -108,6 +108,34 @@ pub fn spawn_all(
             Arc::new(|_sender, _args| Box::pin(async { Ok("OK".into()) })),
         );
 
+        // /memo：查看或編輯備忘錄
+        {
+            let memo_pg = Arc::clone(&res.pg);
+            let memo_agent_id = agent_id.clone();
+            cmd_registry.register(
+                "memo",
+                "查看或編輯備忘錄",
+                "/memo [set <內容>]",
+                Arc::new(move |_sender, args| {
+                    let pg = Arc::clone(&memo_pg);
+                    let aid = memo_agent_id.clone();
+                    Box::pin(async move {
+                        if let Some(new_content) = args.strip_prefix("set ") {
+                            db::postgres::upsert_scratchpad(&pg, &aid, new_content.trim()).await?;
+                            Ok("📝 備忘錄已更新".into())
+                        } else if args.trim().is_empty() || args.trim() == "show" {
+                            let content = db::postgres::get_scratchpad(&pg, &aid)
+                                .await?
+                                .unwrap_or_else(|| "（空）".into());
+                            Ok(format!("📝 備忘錄：\n\n{content}"))
+                        } else {
+                            Ok("用法: /memo [show] | /memo set <內容>".into())
+                        }
+                    })
+                }),
+            );
+        }
+
         // 心跳查看/編輯指令
         if let Some(ref apath) = agent_path {
             register_heartbeat_commands(&mut cmd_registry, apath);
@@ -590,6 +618,17 @@ async fn handle_query(ctx: &MessageContext, question: &str, images: &[api::Image
         .collect::<Vec<_>>()
         .join("\n\n");
 
+    // 近期對話歷史（token-based，最多 5000 tokens）
+    let history = db::postgres::get_history(&ctx.pg, &ctx.agent_id, 5000)
+        .await
+        .unwrap_or_default();
+    let history_section = if history.is_empty() {
+        String::new()
+    } else {
+        let items: String = history.join("\n\n");
+        format!("\n\n## 近期對話\n{items}")
+    };
+
     // 尚未蒸餾的 pending 訊息也加入上下文
     let pending_texts = db::postgres::get_pending_texts(&ctx.pg, &ctx.agent_id)
         .await
@@ -627,7 +666,7 @@ async fn handle_query(ctx: &MessageContext, question: &str, images: &[api::Image
          {soul_section}\
          {}\n\n\
          ## 備忘錄 (Scratchpad)\n{memo_section}\n\n\
-         ## 相關資料\n{context_str}{pending_section}\n\n\
+         ## 相關資料\n{context_str}{pending_section}{history_section}\n\n\
          ## 指示\n\
          請根據上述資料回答使用者的問題。\n\
          如果資料中沒有相關內容，請如實告知。\n\
