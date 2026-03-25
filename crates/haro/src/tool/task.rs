@@ -70,12 +70,13 @@ fn format_tasks(tasks: &[ScheduledTask]) -> String {
     }
     tasks
         .iter()
-        .map(|t| {
+        .enumerate()
+        .map(|(i, t)| {
             let prompt_preview: String = t.prompt.chars().take(60).collect();
             let ellipsis = if t.prompt.chars().count() > 60 { "…" } else { "" };
             format!(
-                "• {} ({}, {})\n  時間: {}\n  prompt: {}{ellipsis}",
-                t.id, t.executor, t.run_at, t.run_at, prompt_preview
+                "#{} {} ({}, {})\n  時間: {}\n  prompt: {}{ellipsis}",
+                i + 1, t.id, t.executor, t.run_at, t.run_at, prompt_preview
             )
         })
         .collect::<Vec<_>>()
@@ -352,9 +353,22 @@ pub fn handle_slash_command(tasks_path: &std::path::Path, args: &str) -> Result<
         return Ok(format_tasks(&config.tasks));
     }
 
-    if let Some(id) = args.strip_prefix("remove ").or_else(|| args.strip_prefix("rm ")) {
-        let id = id.trim();
+    if let Some(id_or_num) = args.strip_prefix("remove ").or_else(|| args.strip_prefix("rm ")) {
+        let id_or_num = id_or_num.trim();
         let mut config = load_config(tasks_path)?;
+
+        // 支援編號刪除（#N 或純數字）
+        let id = if let Some(n) = id_or_num.strip_prefix('#').and_then(|s| s.parse::<usize>().ok())
+            .or_else(|| id_or_num.parse::<usize>().ok())
+        {
+            if n == 0 || n > config.tasks.len() {
+                return Ok(format!("編號 #{n} 不存在，共 {} 筆任務。", config.tasks.len()));
+            }
+            config.tasks[n - 1].id.clone()
+        } else {
+            id_or_num.to_owned()
+        };
+
         let before = config.tasks.len();
         config.tasks.retain(|t| t.id != id);
         if config.tasks.len() == before {
@@ -372,7 +386,7 @@ pub fn handle_slash_command(tasks_path: &std::path::Path, args: &str) -> Result<
     Ok("用法:\n\
         /task — 列出所有待執行任務\n\
         /task add <id> <時間> <提示詞>\n\
-        /task remove <id>"
+        /task remove <編號|id>"
         .into())
 }
 

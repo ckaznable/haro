@@ -84,13 +84,14 @@ fn format_jobs(jobs: &[CronJob]) -> String {
         return "目前沒有排程任務。".into();
     }
     jobs.iter()
-        .map(|j| {
+        .enumerate()
+        .map(|(i, j)| {
             let status = if j.enabled { "啟用" } else { "停用" };
             let prompt_preview: String = j.prompt.chars().take(60).collect();
             let ellipsis = if j.prompt.chars().count() > 60 { "…" } else { "" };
             format!(
-                "• {} [{}] ({}, {})\n  cron: {}\n  prompt: {}{ellipsis}",
-                j.id, status, j.executor, j.cron, j.cron, prompt_preview
+                "#{} {} [{}] ({}, {})\n  cron: {}\n  prompt: {}{ellipsis}",
+                i + 1, j.id, status, j.executor, j.cron, j.cron, prompt_preview
             )
         })
         .collect::<Vec<_>>()
@@ -367,9 +368,22 @@ pub fn handle_slash_command(cron_path: &std::path::Path, args: &str) -> Result<S
         return Ok(format_jobs(&config.jobs));
     }
 
-    if let Some(id) = args.strip_prefix("remove ").or_else(|| args.strip_prefix("rm ")) {
-        let id = id.trim();
+    if let Some(id_or_num) = args.strip_prefix("remove ").or_else(|| args.strip_prefix("rm ")) {
+        let id_or_num = id_or_num.trim();
         let mut config = load_config(cron_path)?;
+
+        // 支援編號刪除（#N 或純數字）
+        let id = if let Some(n) = id_or_num.strip_prefix('#').and_then(|s| s.parse::<usize>().ok())
+            .or_else(|| id_or_num.parse::<usize>().ok())
+        {
+            if n == 0 || n > config.jobs.len() {
+                return Ok(format!("編號 #{n} 不存在，共 {} 筆任務。", config.jobs.len()));
+            }
+            config.jobs[n - 1].id.clone()
+        } else {
+            id_or_num.to_owned()
+        };
+
         let before = config.jobs.len();
         config.jobs.retain(|j| j.id != id);
         if config.jobs.len() == before {
@@ -397,7 +411,7 @@ pub fn handle_slash_command(cron_path: &std::path::Path, args: &str) -> Result<S
     Ok("用法:\n\
         /cron — 列出所有排程\n\
         /cron add <id> <分 時 日 月 週> <提示詞>\n\
-        /cron remove <id>\n\
+        /cron remove <編號|id>\n\
         /cron enable <id>\n\
         /cron disable <id>"
         .into())
