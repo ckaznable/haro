@@ -867,13 +867,6 @@ async fn run_cron(task: CronRunnerTask) -> Result<()> {
     use chrono::Local;
     use tool::cron::{load_config, Executor};
 
-    use std::collections::HashMap;
-    use tokio::task::AbortHandle;
-
-    // 正在執行的任務池（event_id → AbortHandle）
-    let running: Arc<std::sync::Mutex<HashMap<String, AbortHandle>>> =
-        Arc::new(std::sync::Mutex::new(HashMap::new()));
-
     // 初始等待 10 秒，讓其他服務先啟動
     tokio::time::sleep(std::time::Duration::from_secs(10)).await;
 
@@ -981,17 +974,6 @@ async fn run_cron(task: CronRunnerTask) -> Result<()> {
             }
         };
 
-        // 跳過仍在執行中的同名事件（防止 cron 重複觸發）
-        {
-            let guard = running.lock().unwrap();
-            if let Some(handle) = guard.get(event_id) {
-                if !handle.is_finished() {
-                    info!(agent_id = %task.agent_id, event = %event_id, "事件仍在執行中，跳過");
-                    continue;
-                }
-            }
-        }
-
         info!(agent_id = %task.agent_id, event = %event_label, executor = %executor_type, "觸發排程任務");
 
         let (executor, model_name): (&api::gemini::GeminiProvider, &str) = match executor_type {
@@ -1052,63 +1034,30 @@ async fn run_cron(task: CronRunnerTask) -> Result<()> {
 
         let user_message = format!("{event_label}觸發，請執行：\n\n{prompt_text}");
 
-        // 非阻塞執行：spawn 獨立 task，迴圈立即繼續排程下一個事件
-        let exec_pg = Arc::clone(&task.pg);
-        let exec_agent_id = task.agent_id.clone();
-        let exec_model_name = model_name.to_owned();
-        let exec_event_label = event_label.clone();
-        let is_scheduled_task = matches!(&event, NextEvent::ScheduledTask { .. });
-        let exec_tasks_path = task.tasks_path.clone();
-        let exec_task_id = match &event {
-            NextEvent::ScheduledTask { id } => Some(id.clone()),
-            _ => None,
-        };
+        let result = api::chat_with_tools(executor, &system, &user_message, &tools, None).await;
 
-        let executor_arc = match executor_type {
-            Executor::Worker => Arc::clone(&task.worker),
-            Executor::Llm => Arc::clone(&task.llm),
-            Executor::Brain => Arc::clone(&task.brain),
-        };
-
-        let pool = Arc::clone(&running);
-        let pool_key = event_id.to_owned();
-
-        let handle = tokio::spawn(async move {
-            let result = api::chat_with_tools(
-                executor_arc.as_ref(), &system, &user_message, &tools, None,
-            ).await;
-
-            match result {
-                Ok(r) => {
-                    let _ = db::postgres::insert_token_usage(
-                        &exec_pg,
-                        &exec_agent_id,
-                        &exec_model_name,
-                        r.input_tokens,
-                        r.output_tokens,
-                    )
-                    .await;
-                    info!(agent_id = %exec_agent_id, event = %exec_event_label, "排程任務完成");
-                }
-                Err(e) => {
-                    error!(agent_id = %exec_agent_id, event = %exec_event_label, "排程任務失敗: {e:#}");
-                }
+        match result {
+            Ok(r) => {
+                let _ = db::postgres::insert_token_usage(
+                    &task.pg,
+                    &task.agent_id,
+                    model_name,
+                    r.input_tokens,
+                    r.output_tokens,
+                )
+                .await;
+                info!(agent_id = %task.agent_id, event = %event_label, "排程任務完成");
             }
-
-            // 一次性任務完成後從 tasks.toml 中刪除
-            if is_scheduled_task {
-                if let Some(id) = &exec_task_id {
-                    if let Err(e) = tool::task::remove_task(&exec_tasks_path, id) {
-                        error!(agent_id = %exec_agent_id, task_id = %id, "刪除已完成任務失敗: {e:#}");
-                    }
-                }
+            Err(e) => {
+                error!(agent_id = %task.agent_id, event = %event_label, "排程任務失敗: {e:#}");
             }
+        }
 
-            // 從 running pool 中移除
-            pool.lock().unwrap().remove(&pool_key);
-        });
-
-        // 存入 running pool
-        running.lock().unwrap().insert(event_id.to_owned(), handle.abort_handle());
+        // 一次性任務完成後從 tasks.toml 中刪除
+        if let NextEvent::ScheduledTask { id } = &event {
+            if let Err(e) = tool::task::remove_task(&task.tasks_path, id) {
+                error!(agent_id = %task.agent_id, task_id = %id, "刪除已完成任務失敗: {e:#}");
+            }
+        }
     }
 }
