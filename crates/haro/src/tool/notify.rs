@@ -54,15 +54,23 @@ impl Tool for SendMessageTool {
             }
 
             let mut sent = 0;
+            let mut errors = 0;
             for notifier in &self.notifiers {
                 if let Err(e) = notifier.send(message).await {
                     tracing::error!("通知發送失敗: {e:#}");
+                    errors += 1;
                 } else {
                     sent += 1;
                 }
             }
 
-            Ok(format!("已發送到 {sent} 個頻道"))
+            if sent == 0 && errors == 0 {
+                Ok("警告：目前沒有已知的聊天對象，訊息未送出。需要使用者先發送訊息給 Bot 才能建立連線。".into())
+            } else if sent == 0 {
+                Ok(format!("發送失敗（{errors} 個頻道出錯）"))
+            } else {
+                Ok(format!("已發送到 {sent} 個頻道"))
+            }
         })
     }
 }

@@ -797,7 +797,7 @@ async fn run_heartbeat(task: HeartbeatTask) -> Result<()> {
         let notify_instruction = if task.notifiers.is_empty() {
             ""
         } else {
-            "\n如果需要主動通知使用者，請使用 send_message 工具發送訊息到頻道。"
+            "\n\n重要：你的直接回覆不會被任何人看到。所有需要回報的內容都必須使用 send_message 工具發送到頻道，否則使用者不會收到。"
         };
 
         let system = format!(
@@ -808,8 +808,7 @@ async fn run_heartbeat(task: HeartbeatTask) -> Result<()> {
              ## 指示\n\
              這是一個定期心跳喚醒。請根據以下心跳指示執行任務。\n\
              如果有重要的事情需要記住，請使用 save_memo 工具儲存到備忘錄中。\n\
-             備忘錄只用於紀錄固定且明確的資訊（例如偏好、規則、待辦事項），不要紀錄曾經做過的事情。\n\
-             需要回報的事項必須使用 send_message 工具發送到頻道，不要只在內部處理。{notify_instruction}\n\n\
+             備忘錄只用於紀錄固定且明確的資訊（例如偏好、規則、待辦事項），不要紀錄曾經做過的事情。{notify_instruction}\n\n\
              ## 心跳指示\n{}",
             task.agent_prompt, task.heartbeat_prompt
         );
@@ -867,6 +866,13 @@ enum NextEvent {
 async fn run_cron(task: CronRunnerTask) -> Result<()> {
     use chrono::Local;
     use tool::cron::{load_config, Executor};
+
+    use std::collections::HashMap;
+    use tokio::task::AbortHandle;
+
+    // 正在執行的任務池（event_id → AbortHandle）
+    let running: Arc<std::sync::Mutex<HashMap<String, AbortHandle>>> =
+        Arc::new(std::sync::Mutex::new(HashMap::new()));
 
     // 初始等待 10 秒，讓其他服務先啟動
     tokio::time::sleep(std::time::Duration::from_secs(10)).await;
@@ -975,6 +981,17 @@ async fn run_cron(task: CronRunnerTask) -> Result<()> {
             }
         };
 
+        // 跳過仍在執行中的同名事件（防止 cron 重複觸發）
+        {
+            let guard = running.lock().unwrap();
+            if let Some(handle) = guard.get(event_id) {
+                if !handle.is_finished() {
+                    info!(agent_id = %task.agent_id, event = %event_id, "事件仍在執行中，跳過");
+                    continue;
+                }
+            }
+        }
+
         info!(agent_id = %task.agent_id, event = %event_label, executor = %executor_type, "觸發排程任務");
 
         let (executor, model_name): (&api::gemini::GeminiProvider, &str) = match executor_type {
@@ -1018,7 +1035,8 @@ async fn run_cron(task: CronRunnerTask) -> Result<()> {
         let notify_instruction = if task.notifiers.is_empty() {
             ""
         } else {
-            "\n如果需要回報結果，請使用 send_message 工具發送到頻道。"
+            "\n\n重要：執行完成後，你必須使用 send_message 工具將結果發送到頻道。\
+             這是排程任務，沒有人會看到你的直接回覆，只有透過 send_message 發送的訊息使用者才看得到。"
         };
 
         let system = format!(
@@ -1028,37 +1046,69 @@ async fn run_cron(task: CronRunnerTask) -> Result<()> {
              ## 備忘錄 (Scratchpad)\n{memo}\n\n\
              ## 指示\n\
              這是一個排程任務，請根據以下提示詞執行。\n\
-             如果有重要的事情需要記住，請使用 save_memo 工具儲存。\n\
-             需要回報的事項必須使用 send_message 工具發送到頻道。{notify_instruction}",
+             如果有重要的事情需要記住，請使用 save_memo 工具儲存。{notify_instruction}",
             task.agent_prompt
         );
 
         let user_message = format!("{event_label}觸發，請執行：\n\n{prompt_text}");
 
-        let result = api::chat_with_tools(executor, &system, &user_message, &tools, None).await;
+        // 非阻塞執行：spawn 獨立 task，迴圈立即繼續排程下一個事件
+        let exec_pg = Arc::clone(&task.pg);
+        let exec_agent_id = task.agent_id.clone();
+        let exec_model_name = model_name.to_owned();
+        let exec_event_label = event_label.clone();
+        let is_scheduled_task = matches!(&event, NextEvent::ScheduledTask { .. });
+        let exec_tasks_path = task.tasks_path.clone();
+        let exec_task_id = match &event {
+            NextEvent::ScheduledTask { id } => Some(id.clone()),
+            _ => None,
+        };
 
-        match result {
-            Ok(r) => {
-                let _ = db::postgres::insert_token_usage(
-                    &task.pg,
-                    &task.agent_id,
-                    model_name,
-                    r.input_tokens,
-                    r.output_tokens,
-                )
-                .await;
-                info!(agent_id = %task.agent_id, event = %event_label, "排程任務完成");
-            }
-            Err(e) => {
-                error!(agent_id = %task.agent_id, event = %event_label, "排程任務失敗: {e:#}");
-            }
-        }
+        let executor_arc = match executor_type {
+            Executor::Worker => Arc::clone(&task.worker),
+            Executor::Llm => Arc::clone(&task.llm),
+            Executor::Brain => Arc::clone(&task.brain),
+        };
 
-        // 一次性任務完成後從 tasks.toml 中刪除
-        if let NextEvent::ScheduledTask { id } = &event {
-            if let Err(e) = tool::task::remove_task(&task.tasks_path, id) {
-                error!(agent_id = %task.agent_id, task_id = %id, "刪除已完成任務失敗: {e:#}");
+        let pool = Arc::clone(&running);
+        let pool_key = event_id.to_owned();
+
+        let handle = tokio::spawn(async move {
+            let result = api::chat_with_tools(
+                executor_arc.as_ref(), &system, &user_message, &tools, None,
+            ).await;
+
+            match result {
+                Ok(r) => {
+                    let _ = db::postgres::insert_token_usage(
+                        &exec_pg,
+                        &exec_agent_id,
+                        &exec_model_name,
+                        r.input_tokens,
+                        r.output_tokens,
+                    )
+                    .await;
+                    info!(agent_id = %exec_agent_id, event = %exec_event_label, "排程任務完成");
+                }
+                Err(e) => {
+                    error!(agent_id = %exec_agent_id, event = %exec_event_label, "排程任務失敗: {e:#}");
+                }
             }
-        }
+
+            // 一次性任務完成後從 tasks.toml 中刪除
+            if is_scheduled_task {
+                if let Some(id) = &exec_task_id {
+                    if let Err(e) = tool::task::remove_task(&exec_tasks_path, id) {
+                        error!(agent_id = %exec_agent_id, task_id = %id, "刪除已完成任務失敗: {e:#}");
+                    }
+                }
+            }
+
+            // 從 running pool 中移除
+            pool.lock().unwrap().remove(&pool_key);
+        });
+
+        // 存入 running pool
+        running.lock().unwrap().insert(event_id.to_owned(), handle.abort_handle());
     }
 }
