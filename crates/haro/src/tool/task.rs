@@ -434,12 +434,10 @@ fn add_task_from_args(tasks_path: &std::path::Path, rest: &str) -> Result<String
 fn find_datetime_split(s: &str) -> Option<(String, String)> {
     // 嘗試固定長度前綴
     for len in [19, 16] {
-        if s.len() >= len {
-            if validate_datetime(&s[..len]).is_ok() {
-                let rest = s[len..].trim();
-                if !rest.is_empty() {
-                    return Some((s[..len].to_owned(), rest.to_owned()));
-                }
+        if s.len() >= len && validate_datetime(&s[..len]).is_ok() {
+            let rest = s[len..].trim();
+            if !rest.is_empty() {
+                return Some((s[..len].to_owned(), rest.to_owned()));
             }
         }
     }

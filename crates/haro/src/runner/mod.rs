@@ -1,9 +1,11 @@
-use std::str::FromStr;
+mod heartbeat;
+mod scheduler;
+
 use std::sync::Arc;
 
 use anyhow::Result;
 use tokio::task::JoinHandle;
-use tracing::{error, info, warn};
+use tracing::info;
 
 use crate::agent::{Agent, AgentMode};
 use crate::api::{self, LlmProvider};
@@ -58,7 +60,7 @@ pub fn spawn_all(
         // 啟動 LLM 心跳任務
         if !agent_heartbeat.is_empty() {
             info!(agent_id = %agent_id, interval = heartbeat_interval, "啟動 LLM 心跳任務");
-            handles.push(tokio::spawn(run_heartbeat(HeartbeatTask {
+            handles.push(tokio::spawn(heartbeat::run_heartbeat(heartbeat::HeartbeatTask {
                 pg: Arc::clone(&res.pg),
                 worker: Arc::clone(&res.worker),
                 llm: Arc::clone(&res.llm),
@@ -76,7 +78,7 @@ pub fn spawn_all(
         // 啟動大腦心跳任務
         if !agent_brain_heartbeat.is_empty() {
             info!(agent_id = %agent_id, interval = heartbeat_interval, "啟動大腦心跳任務");
-            handles.push(tokio::spawn(run_heartbeat(HeartbeatTask {
+            handles.push(tokio::spawn(heartbeat::run_heartbeat(heartbeat::HeartbeatTask {
                 pg: Arc::clone(&res.pg),
                 worker: Arc::clone(&res.worker),
                 llm: Arc::clone(&res.brain),
@@ -147,11 +149,36 @@ pub fn spawn_all(
             .map(|p| p.join("skills"))
             .filter(|p| p.is_dir());
 
-        // /cron 指令 + 背景 cron runner
+        // /cron 指令 + 排程器
         if let Some(ref apath) = agent_path {
             let cron_path = apath.join("cron.toml");
+            let tasks_path = apath.join("tasks.toml");
+
+            // 建立排程執行池
+            let pool = scheduler::RunningPool::new(scheduler::SchedulerResources {
+                pg: Arc::clone(&res.pg),
+                worker: Arc::clone(&res.worker),
+                llm: Arc::clone(&res.llm),
+                brain: Arc::clone(&res.brain),
+                agent_id: agent_id.clone(),
+                agent_prompt: agent_prompt.clone(),
+                tasks_path: tasks_path.clone(),
+                llm_model: cfg.llm.model.clone(),
+                brain_model: brain_model.clone(),
+                worker_model: cfg.worker.model.clone(),
+                notifiers: notifiers.clone(),
+                searxng_url: cfg.searxng_url.clone(),
+                skills_path: skills_path.clone(),
+            });
+
+            // 載入現有排程並 spawn
+            info!(agent_id = %agent_id, "啟動排程任務");
+            pool.spawn_all(&cron_path, &tasks_path);
+
+            // /cron 指令
             let cp = cron_path.clone();
             let cron_worker = Arc::clone(&res.worker);
+            let cron_pool = Arc::clone(&pool);
             cmd_registry.register(
                 "cron",
                 "管理排程任務（支援自然語言）",
@@ -159,13 +186,32 @@ pub fn spawn_all(
                 Arc::new(move |_sender, args| {
                     let cp = cp.clone();
                     let worker = Arc::clone(&cron_worker);
+                    let pool = Arc::clone(&cron_pool);
                     Box::pin(async move {
                         // 先嘗試結構化指令
                         let result = tool::cron::handle_slash_command(&cp, &args);
                         match result {
                             // 回傳「用法」表示格式不對，改用 worker 解讀
                             Ok(ref text) if text.starts_with("用法:") => {}
-                            other => return other,
+                            other => {
+                                let trimmed = args.trim();
+                                // 新增時同步 spawn
+                                if trimmed.starts_with("add ")
+                                    && let Some(job) = tool::cron::load_config(&cp)
+                                        .ok()
+                                        .and_then(|c| c.jobs.last().cloned())
+                                {
+                                    pool.spawn_cron(&job);
+                                }
+                                // 刪除時中止
+                                if (trimmed.starts_with("remove ") || trimmed.starts_with("rm "))
+                                    && let Ok(text) = &other
+                                    && let Some(id) = extract_removed_id(text, "排程任務")
+                                {
+                                    pool.abort(&id);
+                                }
+                                return other;
+                            }
                         }
                         // fallback: 用 worker + cron 工具解讀自然語言
                         let mut tools = tool::ToolRegistry::new();
@@ -178,15 +224,24 @@ pub fn spawn_all(
                             executor 可選 worker（快速）、llm（主模型）、brain（最強）。\
                             完成後用簡短中文回報結果。";
                         let result = api::chat_with_tools(worker.as_ref(), system, &args, &tools, None).await?;
+                        // NLP 路徑後重新同步：reload 所有 cron
+                        if let Ok(config) = tool::cron::load_config(&cp) {
+                            let running = pool.running_ids();
+                            for job in config.jobs.iter().filter(|j| j.enabled) {
+                                if !running.contains(&job.id) {
+                                    pool.spawn_cron(job);
+                                }
+                            }
+                        }
                         Ok(result.text)
                     })
                 }),
             );
 
             // /task 指令
-            let tasks_path = apath.join("tasks.toml");
             let tp = tasks_path.clone();
             let task_worker = Arc::clone(&res.worker);
+            let task_pool = Arc::clone(&pool);
             cmd_registry.register(
                 "task",
                 "管理一次性排程任務（支援自然語言）",
@@ -194,11 +249,30 @@ pub fn spawn_all(
                 Arc::new(move |_sender, args| {
                     let tp = tp.clone();
                     let worker = Arc::clone(&task_worker);
+                    let pool = Arc::clone(&task_pool);
                     Box::pin(async move {
                         let result = tool::task::handle_slash_command(&tp, &args);
                         match result {
                             Ok(ref text) if text.starts_with("用法:") => {}
-                            other => return other,
+                            other => {
+                                let trimmed = args.trim();
+                                // 新增時同步 spawn
+                                if trimmed.starts_with("add ")
+                                    && let Some(task) = tool::task::load_config(&tp)
+                                        .ok()
+                                        .and_then(|c| c.tasks.last().cloned())
+                                {
+                                    pool.spawn_task(&task);
+                                }
+                                // 刪除時中止
+                                if (trimmed.starts_with("remove ") || trimmed.starts_with("rm "))
+                                    && let Ok(text) = &other
+                                    && let Some(id) = extract_removed_id(text, "一次性任務")
+                                {
+                                    pool.abort(&id);
+                                }
+                                return other;
+                            }
                         }
                         // fallback: 用 worker + task 工具解讀自然語言
                         let mut tools = tool::ToolRegistry::new();
@@ -211,28 +285,19 @@ pub fn spawn_all(
                             executor 可選 worker（快速）、llm（主模型）、brain（最強）。\
                             完成後用簡短中文回報結果。";
                         let result = api::chat_with_tools(worker.as_ref(), system, &args, &tools, None).await?;
+                        // NLP 路徑後重新同步
+                        if let Ok(config) = tool::task::load_config(&tp) {
+                            let running = pool.running_ids();
+                            for task in &config.tasks {
+                                if !running.contains(&task.id) {
+                                    pool.spawn_task(task);
+                                }
+                            }
+                        }
                         Ok(result.text)
                     })
                 }),
             );
-
-            info!(agent_id = %agent_id, "啟動 Cron 排程任務");
-            handles.push(tokio::spawn(run_cron(CronRunnerTask {
-                pg: Arc::clone(&res.pg),
-                worker: Arc::clone(&res.worker),
-                llm: Arc::clone(&res.llm),
-                brain: Arc::clone(&res.brain),
-                agent_id: agent_id.clone(),
-                agent_prompt: agent_prompt.clone(),
-                cron_path,
-                tasks_path,
-                llm_model: cfg.llm.model.clone(),
-                brain_model: brain_model.clone(),
-                worker_model: cfg.worker.model.clone(),
-                notifiers: notifiers.clone(),
-                searxng_url: cfg.searxng_url.clone(),
-                skills_path: skills_path.clone(),
-            })));
         }
 
         // /skills 指令：列出可用 skills
@@ -467,6 +532,14 @@ pub fn spawn_all(
     handles
 }
 
+/// 從移除結果文字中提取 id（格式：「已移除XXX「id」」）
+fn extract_removed_id(text: &str, _kind: &str) -> Option<String> {
+    // 匹配「xxx」中的 xxx
+    let start = text.find('「')? + '「'.len_utf8();
+    let end = text[start..].find('」')? + start;
+    Some(text[start..end].to_owned())
+}
+
 /// 註冊心跳查看/編輯指令
 fn register_heartbeat_commands(registry: &mut CommandRegistry, apath: &std::path::Path) {
     let hb_path = apath.join("HEARTBEAT.md");
@@ -517,6 +590,8 @@ fn register_heartbeat_commands(registry: &mut CommandRegistry, apath: &std::path
         }),
     );
 }
+
+// ── 訊息處理 ──
 
 /// 訊息處理所需的共用上下文（避免過多參數）
 struct MessageContext {
@@ -702,362 +777,4 @@ async fn handle_message(
     handle_ingest(ctx, &reply, &[], &empty_meta).await?;
 
     Ok(Some(reply))
-}
-
-const HEARTBEAT_TRIAGE_PROMPT: &str = "\
-You are a triage agent. Given the heartbeat instructions, current time, and scratchpad context, \
-decide whether there is a task that needs to be executed RIGHT NOW.\n\
-Consider time-sensitive tasks, scheduled actions, and pending items.\n\n\
-Reply with ONLY \"yes\" (needs action now) or \"no\" (skip this cycle).";
-
-/// 心跳任務設定
-struct HeartbeatTask {
-    pg: Arc<sqlx::PgPool>,
-    worker: Arc<api::gemini::GeminiProvider>,
-    llm: Arc<api::gemini::GeminiProvider>,
-    agent_id: String,
-    agent_prompt: String,
-    heartbeat_prompt: String,
-    interval_secs: u64,
-    llm_model: String,
-    notifiers: Vec<Arc<dyn Notifier>>,
-    searxng_url: Option<String>,
-    agent_path: Option<std::path::PathBuf>,
-}
-
-/// 心跳任務：定期喚醒 worker 判斷是否需要呼叫 LLM 執行任務
-async fn run_heartbeat(task: HeartbeatTask) -> Result<()> {
-    let interval = std::time::Duration::from_secs(task.interval_secs);
-
-    loop {
-        tokio::time::sleep(interval).await;
-
-        info!(agent_id = %task.agent_id, "心跳觸發");
-
-        let memo = db::postgres::get_scratchpad(&task.pg, &task.agent_id)
-            .await
-            .unwrap_or(None)
-            .unwrap_or_default();
-
-        let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %:z");
-
-        let context = format!(
-            "目前時間：{now}\n\n\
-             ## 心跳指示\n{}\n\n\
-             ## 備忘錄\n{memo}",
-            task.heartbeat_prompt
-        );
-
-        let triage_result = task
-            .worker
-            .generate(api::GenerateParams {
-                system: Some(HEARTBEAT_TRIAGE_PROMPT),
-                user_message: &context,
-                images: &[],
-                json_mode: false,
-                temperature: 0.0,
-            })
-            .await;
-
-        let needs_action = match triage_result {
-            Ok(r) => r.text.trim().to_lowercase().starts_with("yes"),
-            Err(e) => {
-                error!(agent_id = %task.agent_id, "心跳分流判斷失敗: {e:#}");
-                continue;
-            }
-        };
-
-        if !needs_action {
-            info!(agent_id = %task.agent_id, "心跳：無需執行任務");
-            continue;
-        }
-
-        info!(agent_id = %task.agent_id, "心跳：喚醒 LLM 執行任務");
-
-        let mut tools = tool::ToolRegistry::new();
-        for t in tool::scratchpad::tools(Arc::clone(&task.pg), task.agent_id.clone()) {
-            tools.register(t);
-        }
-        tools.register(tool::fetch::tool());
-        if task.llm.grounding() {
-            tools.register(tool::search::tool(Arc::clone(&task.llm)));
-        }
-        if let Some(ref url) = task.searxng_url {
-            tools.register(tool::searxng::tool(url.clone()));
-        }
-        if let Some(ref ap) = task.agent_path {
-            for t in tool::heartbeat::tools(ap.clone()) {
-                tools.register(t);
-            }
-        }
-        if !task.notifiers.is_empty() {
-            tools.register(tool::notify::tool(task.notifiers.clone()));
-        }
-
-        let notify_instruction = if task.notifiers.is_empty() {
-            ""
-        } else {
-            "\n\n重要：你的直接回覆不會被任何人看到。所有需要回報的內容都必須使用 send_message 工具發送到頻道，否則使用者不會收到。"
-        };
-
-        let system = format!(
-            "你是一個具有長期記憶的 AI 助手。\n\n\
-             目前時間：{now}\n\n\
-             {}\n\n\
-             ## 備忘錄 (Scratchpad)\n{memo}\n\n\
-             ## 指示\n\
-             這是一個定期心跳喚醒。請根據以下心跳指示執行任務。\n\
-             如果有重要的事情需要記住，請使用 save_memo 工具儲存到備忘錄中。\n\
-             備忘錄只用於紀錄固定且明確的資訊（例如偏好、規則、待辦事項），不要紀錄曾經做過的事情。{notify_instruction}\n\n\
-             ## 心跳指示\n{}",
-            task.agent_prompt, task.heartbeat_prompt
-        );
-
-        let result = api::chat_with_tools(task.llm.as_ref(), &system, "心跳觸發，請執行任務。", &tools, None).await;
-
-        match result {
-            Ok(r) => {
-                let _ = db::postgres::insert_token_usage(
-                    &task.pg,
-                    &task.agent_id,
-                    &task.llm_model,
-                    r.input_tokens,
-                    r.output_tokens,
-                )
-                .await;
-                info!(agent_id = %task.agent_id, "心跳任務完成: {}", r.text.chars().take(100).collect::<String>());
-            }
-            Err(e) => {
-                error!(agent_id = %task.agent_id, "心跳執行失敗: {e:#}");
-            }
-        }
-    }
-}
-
-// ── Cron 排程任務 ──
-
-/// Cron 排程任務設定
-struct CronRunnerTask {
-    pg: Arc<sqlx::PgPool>,
-    worker: Arc<api::gemini::GeminiProvider>,
-    llm: Arc<api::gemini::GeminiProvider>,
-    brain: Arc<api::gemini::GeminiProvider>,
-    agent_id: String,
-    agent_prompt: String,
-    cron_path: std::path::PathBuf,
-    tasks_path: std::path::PathBuf,
-    llm_model: String,
-    brain_model: String,
-    worker_model: String,
-    notifiers: Vec<Arc<dyn Notifier>>,
-    searxng_url: Option<String>,
-    skills_path: Option<std::path::PathBuf>,
-}
-
-/// 下一個要執行的事件類型
-enum NextEvent {
-    /// 週期性 cron job
-    CronJob { id: String },
-    /// 一次性排程任務
-    ScheduledTask { id: String },
-}
-
-/// Cron 排程背景迴圈：載入 cron.toml，計算下次觸發時間，到時執行
-async fn run_cron(task: CronRunnerTask) -> Result<()> {
-    use chrono::Local;
-    use tool::cron::{load_config, Executor};
-
-    // 初始等待 10 秒，讓其他服務先啟動
-    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-
-    loop {
-        // 每次迴圈重新載入 cron.toml（支援熱更新）
-        let config = match load_config(&task.cron_path) {
-            Ok(c) => c,
-            Err(e) => {
-                error!(agent_id = %task.agent_id, "載入 cron.toml 失敗: {e:#}");
-                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-                continue;
-            }
-        };
-
-        let now = Local::now();
-        let mut earliest_event: Option<NextEvent> = None;
-        let mut earliest_time: Option<chrono::DateTime<Local>> = None;
-
-        // 檢查 cron jobs
-        for job in config.jobs.iter().filter(|j| j.enabled) {
-            let full_expr = format!("0 {} *", job.cron);
-            let schedule = match cron::Schedule::from_str(&full_expr) {
-                Ok(s) => s,
-                Err(e) => {
-                    warn!(agent_id = %task.agent_id, job_id = %job.id, "cron 表達式無效，跳過: {e}");
-                    continue;
-                }
-            };
-
-            if let Some(next) = schedule.upcoming(Local).next() {
-                if earliest_time.is_none() || next < earliest_time.unwrap() {
-                    earliest_time = Some(next);
-                    earliest_event = Some(NextEvent::CronJob { id: job.id.clone() });
-                }
-            }
-        }
-
-        // 檢查一次性排程任務（tasks.toml）
-        let tasks_config = tool::task::load_config(&task.tasks_path).unwrap_or_default();
-        for st in &tasks_config.tasks {
-            if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&st.run_at) {
-                let dt_local = dt.with_timezone(&Local);
-                if dt_local <= now {
-                    // 已過期但未執行，立即執行
-                    earliest_time = Some(now);
-                    earliest_event = Some(NextEvent::ScheduledTask { id: st.id.clone() });
-                    break; // 過期任務優先
-                } else if earliest_time.is_none() || dt_local < earliest_time.unwrap() {
-                    earliest_time = Some(dt_local);
-                    earliest_event = Some(NextEvent::ScheduledTask { id: st.id.clone() });
-                }
-            } else {
-                warn!(agent_id = %task.agent_id, task_id = %st.id, "一次性任務時間格式無效，跳過");
-            }
-        }
-
-        let (Some(next_time), Some(event)) = (earliest_time, earliest_event) else {
-            // 沒有任何排程，等 60 秒後再檢查
-            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-            continue;
-        };
-
-        let event_id = match &event {
-            NextEvent::CronJob { id } => id.as_str(),
-            NextEvent::ScheduledTask { id } => id.as_str(),
-        };
-
-        let wait_duration = (next_time - now).to_std().unwrap_or(std::time::Duration::ZERO);
-        if !wait_duration.is_zero() {
-            info!(
-                agent_id = %task.agent_id,
-                next_event = %event_id,
-                next_time = %next_time.format("%H:%M:%S"),
-                wait_secs = wait_duration.as_secs(),
-                "排程等待下次觸發"
-            );
-            tokio::time::sleep(wait_duration).await;
-        }
-
-        // 重新載入設定（等待期間可能有變更）
-        let config = match load_config(&task.cron_path) {
-            Ok(c) => c,
-            Err(e) => {
-                error!(agent_id = %task.agent_id, "載入 cron.toml 失敗: {e:#}");
-                continue;
-            }
-        };
-
-        // 取得 executor + prompt
-        let (executor_type, prompt_text, event_label) = match &event {
-            NextEvent::CronJob { id } => {
-                let Some(job) = config.jobs.iter().find(|j| j.id == *id && j.enabled) else {
-                    info!(agent_id = %task.agent_id, job_id = %id, "任務已被移除或停用，跳過");
-                    continue;
-                };
-                (job.executor.clone(), job.prompt.clone(), format!("cron「{id}」"))
-            }
-            NextEvent::ScheduledTask { id } => {
-                let tasks_config = tool::task::load_config(&task.tasks_path).unwrap_or_default();
-                let Some(st) = tasks_config.tasks.iter().find(|t| t.id == *id) else {
-                    info!(agent_id = %task.agent_id, task_id = %id, "任務已被移除，跳過");
-                    continue;
-                };
-                (st.executor.clone(), st.prompt.clone(), format!("一次性任務「{id}」"))
-            }
-        };
-
-        info!(agent_id = %task.agent_id, event = %event_label, executor = %executor_type, "觸發排程任務");
-
-        let (executor, model_name): (&api::gemini::GeminiProvider, &str) = match executor_type {
-            Executor::Worker => (task.worker.as_ref(), &task.worker_model),
-            Executor::Llm => (task.llm.as_ref(), &task.llm_model),
-            Executor::Brain => (task.brain.as_ref(), &task.brain_model),
-        };
-
-        // 建立工具
-        let mut tools = tool::ToolRegistry::new();
-        for t in tool::scratchpad::tools(Arc::clone(&task.pg), task.agent_id.clone()) {
-            tools.register(t);
-        }
-        tools.register(tool::fetch::tool());
-        if executor.grounding() {
-            let executor_arc = match executor_type {
-                Executor::Worker => Arc::clone(&task.worker),
-                Executor::Llm => Arc::clone(&task.llm),
-                Executor::Brain => Arc::clone(&task.brain),
-            };
-            tools.register(tool::search::tool(executor_arc));
-        }
-        if let Some(ref url) = task.searxng_url {
-            tools.register(tool::searxng::tool(url.clone()));
-        }
-        if let Some(ref sp) = task.skills_path {
-            for t in tool::skills::tools(sp.clone()) {
-                tools.register(t);
-            }
-        }
-        if !task.notifiers.is_empty() {
-            tools.register(tool::notify::tool(task.notifiers.clone()));
-        }
-
-        let memo = db::postgres::get_scratchpad(&task.pg, &task.agent_id)
-            .await
-            .unwrap_or(None)
-            .unwrap_or_default();
-
-        let now = Local::now().format("%Y-%m-%d %H:%M:%S %:z");
-        let notify_instruction = if task.notifiers.is_empty() {
-            ""
-        } else {
-            "\n\n重要：執行完成後，你必須使用 send_message 工具將結果發送到頻道。\
-             這是排程任務，沒有人會看到你的直接回覆，只有透過 send_message 發送的訊息使用者才看得到。"
-        };
-
-        let system = format!(
-            "你是一個 AI 助手，正在執行排程任務。\n\n\
-             目前時間：{now}\n\n\
-             {}\n\n\
-             ## 備忘錄 (Scratchpad)\n{memo}\n\n\
-             ## 指示\n\
-             這是一個排程任務，請根據以下提示詞執行。\n\
-             如果有重要的事情需要記住，請使用 save_memo 工具儲存。{notify_instruction}",
-            task.agent_prompt
-        );
-
-        let user_message = format!("{event_label}觸發，請執行：\n\n{prompt_text}");
-
-        let result = api::chat_with_tools(executor, &system, &user_message, &tools, None).await;
-
-        match result {
-            Ok(r) => {
-                let _ = db::postgres::insert_token_usage(
-                    &task.pg,
-                    &task.agent_id,
-                    model_name,
-                    r.input_tokens,
-                    r.output_tokens,
-                )
-                .await;
-                info!(agent_id = %task.agent_id, event = %event_label, "排程任務完成");
-            }
-            Err(e) => {
-                error!(agent_id = %task.agent_id, event = %event_label, "排程任務失敗: {e:#}");
-            }
-        }
-
-        // 一次性任務完成後從 tasks.toml 中刪除
-        if let NextEvent::ScheduledTask { id } = &event {
-            if let Err(e) = tool::task::remove_task(&task.tasks_path, id) {
-                error!(agent_id = %task.agent_id, task_id = %id, "刪除已完成任務失敗: {e:#}");
-            }
-        }
-    }
 }
