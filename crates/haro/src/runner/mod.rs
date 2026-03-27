@@ -1,3 +1,4 @@
+mod cmd;
 mod heartbeat;
 mod scheduler;
 
@@ -8,8 +9,8 @@ use tokio::task::JoinHandle;
 use tracing::info;
 
 use crate::agent::{Agent, AgentMode};
-use crate::api::{self, LlmProvider};
-use crate::channel::{CommandRegistry, MessageHandler, Notifier};
+use crate::api::{self};
+use crate::channel::{MessageHandler, Notifier};
 use crate::config::AppConfig;
 use crate::db::postgres::ImageMeta;
 use crate::{db, search, tool};
@@ -93,360 +94,26 @@ pub fn spawn_all(
             })));
         }
 
-        // 建立指令註冊表
-        let mut cmd_registry = CommandRegistry::new();
-
-        cmd_registry.register(
-            "stop",
-            "中斷正在處理的任務",
-            "/stop",
-            Arc::new(|_sender, _args| Box::pin(async { Ok("此指令由頻道直接處理。".into()) })),
-        );
-
-        cmd_registry.register(
-            "ping",
-            "檢查機器人是否在線",
-            "/ping",
-            Arc::new(|_sender, _args| Box::pin(async { Ok("OK".into()) })),
-        );
-
-        // /memo：查看或編輯備忘錄
-        {
-            let memo_pg = Arc::clone(&res.pg);
-            let memo_agent_id = agent_id.clone();
-            cmd_registry.register(
-                "memo",
-                "查看或編輯備忘錄",
-                "/memo [set <內容>]",
-                Arc::new(move |_sender, args| {
-                    let pg = Arc::clone(&memo_pg);
-                    let aid = memo_agent_id.clone();
-                    Box::pin(async move {
-                        if let Some(new_content) = args.strip_prefix("set ") {
-                            db::postgres::upsert_scratchpad(&pg, &aid, new_content.trim()).await?;
-                            Ok("📝 備忘錄已更新".into())
-                        } else if args.trim().is_empty() || args.trim() == "show" {
-                            let content = db::postgres::get_scratchpad(&pg, &aid)
-                                .await?
-                                .unwrap_or_else(|| "（空）".into());
-                            Ok(format!("📝 備忘錄：\n\n{content}"))
-                        } else {
-                            Ok("用法: /memo [show] | /memo set <內容>".into())
-                        }
-                    })
-                }),
-            );
-        }
-
-        // 心跳查看/編輯指令
-        if let Some(ref apath) = agent_path {
-            register_heartbeat_commands(&mut cmd_registry, apath);
-        }
-
         // Skills 目錄（存在才啟用）
         let skills_path = agent_path
             .as_ref()
             .map(|p| p.join("skills"))
             .filter(|p| p.is_dir());
 
-        // /cron 指令 + 排程器
-        if let Some(ref apath) = agent_path {
-            let cron_path = apath.join("cron.toml");
-            let tasks_path = apath.join("tasks.toml");
-
-            // 建立排程執行池
-            let pool = scheduler::RunningPool::new(scheduler::SchedulerResources {
-                pg: Arc::clone(&res.pg),
-                worker: Arc::clone(&res.worker),
-                llm: Arc::clone(&res.llm),
-                brain: Arc::clone(&res.brain),
-                agent_id: agent_id.clone(),
-                agent_prompt: agent_prompt.clone(),
-                tasks_path: tasks_path.clone(),
-                llm_model: cfg.llm.model.clone(),
-                brain_model: brain_model.clone(),
-                worker_model: cfg.worker.model.clone(),
-                notifiers: notifiers.clone(),
-                searxng_url: cfg.searxng_url.clone(),
-                skills_path: skills_path.clone(),
-            });
-
-            // 載入現有排程並 spawn
-            info!(agent_id = %agent_id, "啟動排程任務");
-            pool.spawn_all(&cron_path, &tasks_path);
-
-            // /cron 指令
-            let cp = cron_path.clone();
-            let cron_worker = Arc::clone(&res.worker);
-            let cron_pool = Arc::clone(&pool);
-            cmd_registry.register(
-                "cron",
-                "管理排程任務（支援自然語言）",
-                "/cron [list|add|remove|enable|disable|<自然語言>]",
-                Arc::new(move |_sender, args| {
-                    let cp = cp.clone();
-                    let worker = Arc::clone(&cron_worker);
-                    let pool = Arc::clone(&cron_pool);
-                    Box::pin(async move {
-                        // 先嘗試結構化指令
-                        let result = tool::cron::handle_slash_command(&cp, &args);
-                        match result {
-                            // 回傳「用法」表示格式不對，改用 worker 解讀
-                            Ok(ref text) if text.starts_with("用法:") => {}
-                            other => {
-                                let trimmed = args.trim();
-                                // 新增時同步 spawn
-                                if trimmed.starts_with("add ")
-                                    && let Some(job) = tool::cron::load_config(&cp)
-                                        .ok()
-                                        .and_then(|c| c.jobs.last().cloned())
-                                {
-                                    pool.spawn_cron(&job);
-                                }
-                                // 刪除時中止
-                                if (trimmed.starts_with("remove ") || trimmed.starts_with("rm "))
-                                    && let Ok(text) = &other
-                                    && let Some(id) = extract_removed_id(text, "排程任務")
-                                {
-                                    pool.abort(&id);
-                                }
-                                return other;
-                            }
-                        }
-                        // fallback: 用 worker + cron 工具解讀自然語言
-                        let mut tools = tool::ToolRegistry::new();
-                        for t in tool::cron::tools(cp.parent().unwrap().to_path_buf()) {
-                            tools.register(t);
-                        }
-                        let system = "你是一個排程任務管理助手。\
-                            使用者想管理 cron 排程任務，請根據使用者的描述使用工具完成操作。\
-                            cron 表達式為標準 5 欄位格式（分 時 日 月 週）。\
-                            executor 可選 worker（快速）、llm（主模型）、brain（最強）。\
-                            完成後用簡短中文回報結果。";
-                        let result = api::chat_with_tools(worker.as_ref(), system, &args, &tools, None).await?;
-                        // NLP 路徑後重新同步：reload 所有 cron
-                        if let Ok(config) = tool::cron::load_config(&cp) {
-                            let running = pool.running_ids();
-                            for job in config.jobs.iter().filter(|j| j.enabled) {
-                                if !running.contains(&job.id) {
-                                    pool.spawn_cron(job);
-                                }
-                            }
-                        }
-                        Ok(result.text)
-                    })
-                }),
-            );
-
-            // /task 指令
-            let tp = tasks_path.clone();
-            let task_worker = Arc::clone(&res.worker);
-            let task_pool = Arc::clone(&pool);
-            cmd_registry.register(
-                "task",
-                "管理一次性排程任務（支援自然語言）",
-                "/task [list|add|remove|<自然語言>]",
-                Arc::new(move |_sender, args| {
-                    let tp = tp.clone();
-                    let worker = Arc::clone(&task_worker);
-                    let pool = Arc::clone(&task_pool);
-                    Box::pin(async move {
-                        let result = tool::task::handle_slash_command(&tp, &args);
-                        match result {
-                            Ok(ref text) if text.starts_with("用法:") => {}
-                            other => {
-                                let trimmed = args.trim();
-                                // 新增時同步 spawn
-                                if trimmed.starts_with("add ")
-                                    && let Some(task) = tool::task::load_config(&tp)
-                                        .ok()
-                                        .and_then(|c| c.tasks.last().cloned())
-                                {
-                                    pool.spawn_task(&task);
-                                }
-                                // 刪除時中止
-                                if (trimmed.starts_with("remove ") || trimmed.starts_with("rm "))
-                                    && let Ok(text) = &other
-                                    && let Some(id) = extract_removed_id(text, "一次性任務")
-                                {
-                                    pool.abort(&id);
-                                }
-                                return other;
-                            }
-                        }
-                        // fallback: 用 worker + task 工具解讀自然語言
-                        let mut tools = tool::ToolRegistry::new();
-                        for t in tool::task::tools(tp.parent().unwrap().to_path_buf()) {
-                            tools.register(t);
-                        }
-                        let system = "你是一個排程任務管理助手。\
-                            使用者想管理一次性排程任務，請根據使用者的描述使用工具完成操作。\
-                            時間格式支援 ISO 8601 或 YYYY-MM-DD HH:MM。\
-                            executor 可選 worker（快速）、llm（主模型）、brain（最強）。\
-                            完成後用簡短中文回報結果。";
-                        let result = api::chat_with_tools(worker.as_ref(), system, &args, &tools, None).await?;
-                        // NLP 路徑後重新同步
-                        if let Ok(config) = tool::task::load_config(&tp) {
-                            let running = pool.running_ids();
-                            for task in &config.tasks {
-                                if !running.contains(&task.id) {
-                                    pool.spawn_task(task);
-                                }
-                            }
-                        }
-                        Ok(result.text)
-                    })
-                }),
-            );
-        }
-
-        // /skills 指令：列出可用 skills
-        if let Some(ref sp) = skills_path {
-            let sp_clone = sp.clone();
-            cmd_registry.register(
-                "skills",
-                "列出可用的 skills",
-                "/skills",
-                Arc::new(move |_sender, _args| {
-                    let sp = sp_clone.clone();
-                    Box::pin(async move {
-                        let entries = tool::skills::list_skill_entries(&sp);
-                        if entries.is_empty() {
-                            return Ok("目前沒有可用的 skills。".into());
-                        }
-                        let list: Vec<String> = entries
-                            .iter()
-                            .map(|(name, desc)| {
-                                if desc.is_empty() {
-                                    format!("• {name}")
-                                } else {
-                                    format!("• {name} — {desc}")
-                                }
-                            })
-                            .collect();
-                        Ok(format!("可用 Skills:\n{}", list.join("\n")))
-                    })
-                }),
-            );
-        }
-
-        // ingest 模式：註冊 /ask 指令，用於查詢向量資料庫
-        if agent_mode == AgentMode::Ingest {
-            let ask_ctx = Arc::new(MessageContext {
-                pg: Arc::clone(&res.pg),
-                qdrant: Arc::clone(&res.qdrant),
-                embedder: Arc::clone(&res.embedder),
-                llm: Arc::clone(&res.llm),
-                worker: Arc::clone(&res.worker),
-                agent_id: agent_id.clone(),
-                prompt: agent_prompt.clone(),
-                soul: agent_soul.clone(),
-                worker_model: cfg.worker.model.clone(),
-                llm_model: cfg.llm.model.clone(),
-                image_embed: cfg.embedding.image_embed,
-                skills_path: skills_path.clone(),
-                agent_path: agent_path.clone(),
-                searxng_url: cfg.searxng_url.clone(),
-            });
-            cmd_registry.register(
-                "ask",
-                "查詢已收集的資料",
-                "/ask <問題>",
-                Arc::new(move |_sender, args| {
-                    let ctx = Arc::clone(&ask_ctx);
-                    Box::pin(async move {
-                        let question = args.trim();
-                        if question.is_empty() {
-                            return Ok("用法: /ask <問題>".into());
-                        }
-                        handle_query(&ctx, question, &[], None).await
-                    })
-                }),
-            );
-        }
-
-        // LLM 互動指令（來自 cmd.toml）
-        for cmd_def in &agent_llm_commands {
-            let cmd_prompt = cmd_def.prompt.clone();
-            let cmd_tools = cmd_def.tools.clone();
-            let llm_for_cmd = Arc::clone(&res.llm);
-            let pg_for_cmd = Arc::clone(&res.pg);
-            let soul_for_cmd = agent_soul.clone();
-            let prompt_for_cmd = agent_prompt.clone();
-            let aid_for_cmd = agent_id.clone();
-
-            cmd_registry.register(
-                cmd_def.name.clone(),
-                cmd_def.description.clone(),
-                format!("/{} [補充說明]", cmd_def.name),
-                Arc::new(move |_sender, args| {
-                    let cmd_prompt = cmd_prompt.clone();
-                    let cmd_tools = cmd_tools.clone();
-                    let llm = Arc::clone(&llm_for_cmd);
-                    let pg = Arc::clone(&pg_for_cmd);
-                    let soul = soul_for_cmd.clone();
-                    let prompt = prompt_for_cmd.clone();
-                    let aid = aid_for_cmd.clone();
-                    Box::pin(async move {
-                        let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %:z");
-
-                        let soul_section = if soul.is_empty() {
-                            String::new()
-                        } else {
-                            format!("## 性格設定\n{soul}\n\n")
-                        };
-
-                        let system = format!(
-                            "你是一個 AI 助手。\n\n\
-                             目前時間：{now}\n\n\
-                             {soul_section}\
-                             {prompt}"
-                        );
-
-                        let user_message = if args.trim().is_empty() {
-                            cmd_prompt
-                        } else {
-                            format!("{cmd_prompt}\n\n{}", args.trim())
-                        };
-
-                        let result = if cmd_tools.is_empty() {
-                            llm.generate(api::GenerateParams {
-                                system: Some(&system),
-                                user_message: &user_message,
-                                images: &[],
-                                json_mode: false,
-                                temperature: 0.7,
-                            })
-                            .await?
-                        } else {
-                            let tools = tool::build_registry(&cmd_tools, &pg, &aid);
-                            api::chat_with_tools(llm.as_ref(), &system, &user_message, &tools, None)
-                                .await?
-                        };
-
-                        Ok(result.text)
-                    })
-                }),
-            );
-        }
-
-        // help 最後註冊，help_text() 會包含前面所有指令 + help 自己
-        cmd_registry.register(
-            "help",
-            "顯示可用指令列表",
-            "/help",
-            Arc::new(|_sender, _args| Box::pin(async { Ok(String::new()) })),
-        );
-        let help_text = cmd_registry.help_text();
-        cmd_registry.register(
-            "help",
-            "顯示可用指令列表",
-            "/help",
-            Arc::new(move |_sender, _args| {
-                let text = help_text.clone();
-                Box::pin(async move { Ok(text) })
-            }),
-        );
+        // 建立指令註冊表
+        let cmd_registry = cmd::register_all(&cmd::CmdContext {
+            res,
+            cfg,
+            agent_id: &agent_id,
+            agent_mode: &agent_mode,
+            agent_prompt: &agent_prompt,
+            agent_soul: &agent_soul,
+            agent_path: &agent_path,
+            skills_path: &skills_path,
+            notifiers: &notifiers,
+            llm_commands: &agent_llm_commands,
+            brain_model: &brain_model,
+        });
 
         let commands = Arc::new(cmd_registry);
 
@@ -530,65 +197,6 @@ pub fn spawn_all(
     }
 
     handles
-}
-
-/// 從移除結果文字中提取 id（格式：「已移除XXX「id」」）
-fn extract_removed_id(text: &str, _kind: &str) -> Option<String> {
-    // 匹配「xxx」中的 xxx
-    let start = text.find('「')? + '「'.len_utf8();
-    let end = text[start..].find('」')? + start;
-    Some(text[start..end].to_owned())
-}
-
-/// 註冊心跳查看/編輯指令
-fn register_heartbeat_commands(registry: &mut CommandRegistry, apath: &std::path::Path) {
-    let hb_path = apath.join("HEARTBEAT.md");
-    registry.register(
-        "heartbeat",
-        "查看或設定心跳提示詞",
-        "/heartbeat [show|set <內容>]",
-        Arc::new(move |_sender, args| {
-            let hb_path = hb_path.clone();
-            Box::pin(async move {
-                let subcmd = args.trim();
-                if subcmd.is_empty() || subcmd == "show" {
-                    let content = tokio::fs::read_to_string(&hb_path)
-                        .await
-                        .unwrap_or_else(|_| "（無 HEARTBEAT.md）".into());
-                    Ok(format!("HEARTBEAT.md:\n\n{content}"))
-                } else if let Some(new_content) = subcmd.strip_prefix("set ") {
-                    tokio::fs::write(&hb_path, new_content).await?;
-                    Ok("HEARTBEAT.md 已更新".into())
-                } else {
-                    Ok("用法: /heartbeat [show] | /heartbeat set <內容>".into())
-                }
-            })
-        }),
-    );
-
-    let bhb_path = apath.join("BRAIN_HEARTBEAT.md");
-    registry.register(
-        "brain_heartbeat",
-        "查看或設定大腦心跳提示詞",
-        "/brain_heartbeat [show|set <內容>]",
-        Arc::new(move |_sender, args| {
-            let bhb_path = bhb_path.clone();
-            Box::pin(async move {
-                let subcmd = args.trim();
-                if subcmd.is_empty() || subcmd == "show" {
-                    let content = tokio::fs::read_to_string(&bhb_path)
-                        .await
-                        .unwrap_or_else(|_| "（無 BRAIN_HEARTBEAT.md）".into());
-                    Ok(format!("BRAIN_HEARTBEAT.md:\n\n{content}"))
-                } else if let Some(new_content) = subcmd.strip_prefix("set ") {
-                    tokio::fs::write(&bhb_path, new_content).await?;
-                    Ok("BRAIN_HEARTBEAT.md 已更新".into())
-                } else {
-                    Ok("用法: /brain_heartbeat [show] | /brain_heartbeat set <內容>".into())
-                }
-            })
-        }),
-    );
 }
 
 // ── 訊息處理 ──
