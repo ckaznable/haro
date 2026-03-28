@@ -233,9 +233,6 @@ async fn execute_job(
             tools.register(t);
         }
     }
-    if !res.notifiers.is_empty() {
-        tools.register(tool::notify::tool(res.notifiers.clone()));
-    }
 
     let memo = db::postgres::get_scratchpad(&res.pg, &res.agent_id)
         .await
@@ -246,8 +243,7 @@ async fn execute_job(
     let notify_instruction = if res.notifiers.is_empty() {
         ""
     } else {
-        "\n\n重要：執行完成後，你必須使用 send_message 工具將結果發送到頻道。\
-         這是排程任務，沒有人會看到你的直接回覆，只有透過 send_message 發送的訊息使用者才看得到。"
+        "\n\n重要：你的最終回覆會由系統自動推送到頻道，請直接輸出要給使用者看的內容。"
     };
 
     let system = format!(
@@ -257,6 +253,8 @@ async fn execute_job(
          ## 備忘錄 (Scratchpad)\n{memo}\n\n\
          ## 指示\n\
          這是一個排程任務，請根據以下提示詞執行。\n\
+         請直接輸出要回報給使用者的最終訊息內容，不需要呼叫任何發送工具。\n\
+         如果需要搜尋最新資訊或外部資料，請務必使用可用的搜尋工具，不要憑空猜測。\n\
          如果有重要的事情需要記住，請使用 save_memo 工具儲存。{notify_instruction}",
         res.agent_prompt
     );
@@ -275,6 +273,32 @@ async fn execute_job(
                 r.output_tokens,
             )
             .await;
+
+            if !res.notifiers.is_empty() {
+                let message = r.text.trim();
+                if message.is_empty() {
+                    warn!(agent_id = %res.agent_id, event = %event_label, "排程任務回覆為空，略過通知");
+                } else {
+                    let mut sent = 0usize;
+                    let mut failed = 0usize;
+                    for notifier in &res.notifiers {
+                        match notifier.send(message).await {
+                            Ok(()) => sent += 1,
+                            Err(e) => {
+                                failed += 1;
+                                error!(agent_id = %res.agent_id, event = %event_label, "推送排程結果失敗: {e:#}");
+                            }
+                        }
+                    }
+                    info!(
+                        agent_id = %res.agent_id,
+                        event = %event_label,
+                        sent,
+                        failed,
+                        "排程結果已推送到 notifier"
+                    );
+                }
+            }
             info!(agent_id = %res.agent_id, event = %event_label, "排程任務完成");
         }
         Err(e) => {
