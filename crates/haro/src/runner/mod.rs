@@ -61,37 +61,41 @@ pub fn spawn_all(
         // 啟動 LLM 心跳任務
         if !agent_heartbeat.is_empty() {
             info!(agent_id = %agent_id, interval = heartbeat_interval, "啟動 LLM 心跳任務");
-            handles.push(tokio::spawn(heartbeat::run_heartbeat(heartbeat::HeartbeatTask {
-                pg: Arc::clone(&res.pg),
-                worker: Arc::clone(&res.worker),
-                llm: Arc::clone(&res.llm),
-                agent_id: agent_id.clone(),
-                agent_prompt: agent_prompt.clone(),
-                heartbeat_prompt: agent_heartbeat,
-                interval_secs: heartbeat_interval,
-                llm_model: cfg.llm.model.clone(),
-                notifiers: notifiers.clone(),
-                searxng_url: cfg.searxng_url.clone(),
-                agent_path: agent_path.clone(),
-            })));
+            handles.push(tokio::spawn(heartbeat::run_heartbeat(
+                heartbeat::HeartbeatTask {
+                    pg: Arc::clone(&res.pg),
+                    worker: Arc::clone(&res.worker),
+                    llm: Arc::clone(&res.llm),
+                    agent_id: agent_id.clone(),
+                    agent_prompt: agent_prompt.clone(),
+                    heartbeat_prompt: agent_heartbeat,
+                    interval_secs: heartbeat_interval,
+                    llm_model: cfg.llm.model.clone(),
+                    notifiers: notifiers.clone(),
+                    searxng_url: cfg.searxng_url.clone(),
+                    agent_path: agent_path.clone(),
+                },
+            )));
         }
 
         // 啟動大腦心跳任務
         if !agent_brain_heartbeat.is_empty() {
             info!(agent_id = %agent_id, interval = heartbeat_interval, "啟動大腦心跳任務");
-            handles.push(tokio::spawn(heartbeat::run_heartbeat(heartbeat::HeartbeatTask {
-                pg: Arc::clone(&res.pg),
-                worker: Arc::clone(&res.worker),
-                llm: Arc::clone(&res.brain),
-                agent_id: agent_id.clone(),
-                agent_prompt: agent_prompt.clone(),
-                heartbeat_prompt: agent_brain_heartbeat,
-                interval_secs: heartbeat_interval,
-                llm_model: brain_model.clone(),
-                notifiers: notifiers.clone(),
-                searxng_url: cfg.searxng_url.clone(),
-                agent_path: agent_path.clone(),
-            })));
+            handles.push(tokio::spawn(heartbeat::run_heartbeat(
+                heartbeat::HeartbeatTask {
+                    pg: Arc::clone(&res.pg),
+                    worker: Arc::clone(&res.worker),
+                    llm: Arc::clone(&res.brain),
+                    agent_id: agent_id.clone(),
+                    agent_prompt: agent_prompt.clone(),
+                    heartbeat_prompt: agent_brain_heartbeat,
+                    interval_secs: heartbeat_interval,
+                    llm_model: brain_model.clone(),
+                    notifiers: notifiers.clone(),
+                    searxng_url: cfg.searxng_url.clone(),
+                    agent_path: agent_path.clone(),
+                },
+            )));
         }
 
         // Skills 目錄（存在才啟用）
@@ -168,8 +172,13 @@ pub fn spawn_all(
                                 q.push(&ctx.agent_id, &msg.text, &ctx.worker_model).await?;
                             } else {
                                 let images = to_image_inputs(&msg.images);
-                                let (file_ids, source_chat_id, source_message_id) = extract_image_meta(&msg.images);
-                                let image_meta = ImageMeta { file_ids: &file_ids, source_chat_id, source_message_id };
+                                let (file_ids, source_chat_id, source_message_id) =
+                                    extract_image_meta(&msg.images);
+                                let image_meta = ImageMeta {
+                                    file_ids: &file_ids,
+                                    source_chat_id,
+                                    source_message_id,
+                                };
                                 handle_ingest(&ctx, &msg.text, &images, &image_meta).await?;
                             }
                             Ok(None)
@@ -234,8 +243,13 @@ fn to_image_inputs(images: &[crate::channel::ImageData]) -> Vec<api::ImageInput>
 }
 
 /// 從 channel::ImageData 提取圖片來源 metadata
-fn extract_image_meta(images: &[crate::channel::ImageData]) -> (Vec<String>, Option<i64>, Option<i32>) {
-    let file_ids: Vec<String> = images.iter().filter_map(|img| img.file_id.clone()).collect();
+fn extract_image_meta(
+    images: &[crate::channel::ImageData],
+) -> (Vec<String>, Option<i64>, Option<i32>) {
+    let file_ids: Vec<String> = images
+        .iter()
+        .filter_map(|img| img.file_id.clone())
+        .collect();
     // 取第一張圖片的來源資訊（同一則訊息的圖片來自同一個 chat/message）
     let source_chat_id = images.first().and_then(|img| img.source_chat_id);
     let source_message_id = images.first().and_then(|img| img.source_message_id);
@@ -243,23 +257,57 @@ fn extract_image_meta(images: &[crate::channel::ImageData]) -> (Vec<String>, Opt
 }
 
 /// 僅入庫（ingest 模式），不呼叫 LLM 回覆
-async fn handle_ingest(ctx: &MessageContext, text: &str, images: &[api::ImageInput], image_meta: &ImageMeta<'_>) -> Result<()> {
+async fn handle_ingest(
+    ctx: &MessageContext,
+    text: &str,
+    images: &[api::ImageInput],
+    image_meta: &ImageMeta<'_>,
+) -> Result<()> {
     let embed_images = if ctx.image_embed { images } else { &[] };
-    let (_, wk_usage) =
-        search::ingest(&ctx.pg, &ctx.qdrant, ctx.embedder.as_ref(), ctx.worker.as_ref(), &ctx.agent_id, text, embed_images, image_meta).await?;
+    let (_, wk_usage) = search::ingest(
+        &ctx.pg,
+        &ctx.qdrant,
+        ctx.embedder.as_ref(),
+        ctx.worker.as_ref(),
+        &ctx.agent_id,
+        text,
+        embed_images,
+        image_meta,
+    )
+    .await?;
 
-    db::postgres::insert_token_usage(&ctx.pg, &ctx.agent_id, &ctx.worker_model, wk_usage.input_tokens, wk_usage.output_tokens).await?;
+    db::postgres::insert_token_usage(
+        &ctx.pg,
+        &ctx.agent_id,
+        &ctx.worker_model,
+        wk_usage.input_tokens,
+        wk_usage.output_tokens,
+    )
+    .await?;
 
     Ok(())
 }
 
 /// 查詢（不入庫）：檢索記憶 + LLM 回答
-async fn handle_query(ctx: &MessageContext, question: &str, images: &[api::ImageInput], progress: Option<&api::ProgressSender>) -> Result<String> {
+async fn handle_query(
+    ctx: &MessageContext,
+    question: &str,
+    images: &[api::ImageInput],
+    progress: Option<&api::ProgressSender>,
+) -> Result<String> {
     let memo = db::postgres::get_scratchpad(&ctx.pg, &ctx.agent_id)
         .await?
         .unwrap_or_default();
 
-    let results = search::retrieve(&ctx.pg, &ctx.qdrant, ctx.embedder.as_ref(), &ctx.agent_id, question, 5).await?;
+    let results = search::retrieve(
+        &ctx.pg,
+        &ctx.qdrant,
+        ctx.embedder.as_ref(),
+        &ctx.agent_id,
+        question,
+        5,
+    )
+    .await?;
 
     let mut tools = tool::ToolRegistry::new();
     for t in tool::scratchpad::tools(Arc::clone(&ctx.pg), ctx.agent_id.clone()) {
@@ -328,7 +376,11 @@ async fn handle_query(ctx: &MessageContext, question: &str, images: &[api::Image
         format!("\n\n## 待處理資料（尚未索引）\n{items}")
     };
 
-    let memo_section = if memo.is_empty() { "（空）".to_owned() } else { memo };
+    let memo_section = if memo.is_empty() {
+        "（空）".to_owned()
+    } else {
+        memo
+    };
     let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %:z");
     let soul_section = if ctx.soul.is_empty() {
         String::new()
@@ -358,9 +410,24 @@ async fn handle_query(ctx: &MessageContext, question: &str, images: &[api::Image
         ctx.prompt
     );
 
-    let result = api::chat_with_images(ctx.llm.as_ref(), &system, question, images, &tools, progress).await?;
+    let result = api::chat_with_images(
+        ctx.llm.as_ref(),
+        &system,
+        question,
+        images,
+        &tools,
+        progress,
+    )
+    .await?;
 
-    db::postgres::insert_token_usage(&ctx.pg, &ctx.agent_id, &ctx.llm_model, result.input_tokens, result.output_tokens).await?;
+    db::postgres::insert_token_usage(
+        &ctx.pg,
+        &ctx.agent_id,
+        &ctx.llm_model,
+        result.input_tokens,
+        result.output_tokens,
+    )
+    .await?;
 
     Ok(result.text)
 }
@@ -372,13 +439,21 @@ async fn handle_message(
 ) -> Result<Option<String>> {
     let images = to_image_inputs(&msg.images);
     let (file_ids, source_chat_id, source_message_id) = extract_image_meta(&msg.images);
-    let image_meta = ImageMeta { file_ids: &file_ids, source_chat_id, source_message_id };
+    let image_meta = ImageMeta {
+        file_ids: &file_ids,
+        source_chat_id,
+        source_message_id,
+    };
 
     // 1. 先查詢 + 回覆（LLM chat 端一律傳圖，不受 image_embed 影響）
     let reply = handle_query(ctx, &msg.text, &images, msg.progress.as_ref()).await?;
 
     // 2. 入庫使用者訊息（image_embed 由 handle_ingest 內部判斷）
-    let empty_meta = ImageMeta { file_ids: &[], source_chat_id: None, source_message_id: None };
+    let empty_meta = ImageMeta {
+        file_ids: &[],
+        source_chat_id: None,
+        source_message_id: None,
+    };
     handle_ingest(ctx, &msg.text, &images, &image_meta).await?;
 
     // 3. 入庫 LLM 回覆

@@ -38,10 +38,7 @@ impl Tool for SearchTool {
     }
 
     fn display_call(&self, args: &serde_json::Value) -> Option<String> {
-        let query = args
-            .get("query")
-            .and_then(|v| v.as_str())
-            .unwrap_or("...");
+        let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("...");
         Some(format!("搜尋 {query}"))
     }
 

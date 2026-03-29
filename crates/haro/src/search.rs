@@ -11,8 +11,8 @@ use tracing::{error, info};
 use uuid::Uuid;
 
 use crate::api::{self, EmbeddingProvider, GenerateResult, ImageInput, LlmProvider};
-use crate::db::postgres::ImageMeta;
 use crate::db;
+use crate::db::postgres::ImageMeta;
 use crate::models::{RankedResult, SearchHit};
 
 /// RRF 常數 k（標準值 60）
@@ -99,7 +99,8 @@ pub async fn ingest(
     // dense_summary 為空時跳過 embedding，僅存 PG
     if data.dense_summary.trim().is_empty() {
         let token_count = worker.count_tokens(&data.original_text).await.unwrap_or(0);
-        let inserted = db::postgres::insert_message(pg, bot_id, &data, token_count, image_meta).await?;
+        let inserted =
+            db::postgres::insert_message(pg, bot_id, &data, token_count, image_meta).await?;
         info!(id = %inserted.id, bot_id, "dense_summary 為空，跳過向量入庫");
         return Ok((inserted.id, usage));
     }
@@ -214,7 +215,10 @@ async fn batch_ingest_loop(mut rx: mpsc::Receiver<()>, cfg: BatchIngestConfig) -
     // 啟動時先處理上次中斷遺留的 pending 項目
     let remaining = db::postgres::fetch_pending_ingest(&cfg.pg, cfg.batch_size as i64).await?;
     if !remaining.is_empty() {
-        info!(count = remaining.len(), "啟動時發現未處理的 pending 項目，開始處理");
+        info!(
+            count = remaining.len(),
+            "啟動時發現未處理的 pending 項目，開始處理"
+        );
         process_pending_batch(remaining, &cfg).await;
     }
 
@@ -249,7 +253,10 @@ async fn batch_ingest_loop(mut rx: mpsc::Receiver<()>, cfg: BatchIngestConfig) -
 }
 
 /// 處理一個批次：並行蒸餾 → 批次 embedding → 寫入 PG + Qdrant → 刪除 pending
-async fn process_pending_batch(items: Vec<db::postgres::PendingIngestRow>, cfg: &BatchIngestConfig) {
+async fn process_pending_batch(
+    items: Vec<db::postgres::PendingIngestRow>,
+    cfg: &BatchIngestConfig,
+) {
     let count = items.len();
     let pending_ids: Vec<i64> = items.iter().map(|i| i.id).collect();
     info!(count, "開始批次入庫處理");
@@ -277,17 +284,25 @@ async fn process_pending_batch(items: Vec<db::postgres::PendingIngestRow>, cfg: 
     for (item, result) in items.iter().zip(distill_results) {
         match result {
             Ok(Some((data, usage))) => {
-                distilled.push(DistilledItem { row: item, data, usage });
+                distilled.push(DistilledItem {
+                    row: item,
+                    data,
+                    usage,
+                });
             }
             Ok(None) => {
                 // 蒸餾失敗，僅存原始
-                if let Err(e) = db::postgres::insert_raw_message(&cfg.pg, &item.agent_id, &item.text, 0).await {
+                if let Err(e) =
+                    db::postgres::insert_raw_message(&cfg.pg, &item.agent_id, &item.text, 0).await
+                {
                     error!(agent_id = %item.agent_id, "寫入原始訊息失敗: {e:#}");
                 }
             }
             Err(e) => {
                 error!(agent_id = %item.agent_id, "蒸餾失敗: {e:#}");
-                if let Err(e) = db::postgres::insert_raw_message(&cfg.pg, &item.agent_id, &item.text, 0).await {
+                if let Err(e) =
+                    db::postgres::insert_raw_message(&cfg.pg, &item.agent_id, &item.text, 0).await
+                {
                     error!(agent_id = %item.agent_id, "寫入原始訊息失敗: {e:#}");
                 }
             }
@@ -296,7 +311,10 @@ async fn process_pending_batch(items: Vec<db::postgres::PendingIngestRow>, cfg: 
 
     if !distilled.is_empty() {
         // 2. 批次 embedding
-        let summaries: Vec<String> = distilled.iter().map(|d| d.data.dense_summary.clone()).collect();
+        let summaries: Vec<String> = distilled
+            .iter()
+            .map(|d| d.data.dense_summary.clone())
+            .collect();
         let vectors = match cfg.embedder.batch_embed(&summaries).await {
             Ok(v) => v,
             Err(e) => {
@@ -318,13 +336,37 @@ async fn process_pending_batch(items: Vec<db::postgres::PendingIngestRow>, cfg: 
         // 3. 寫入 PG messages + Qdrant
         for (d, vector) in distilled.iter().zip(vectors) {
             if vector.is_empty() {
-                if let Err(e) = db::postgres::insert_message(&cfg.pg, &d.row.agent_id, &d.data, 0, &ImageMeta { file_ids: &[], source_chat_id: None, source_message_id: None }).await {
+                if let Err(e) = db::postgres::insert_message(
+                    &cfg.pg,
+                    &d.row.agent_id,
+                    &d.data,
+                    0,
+                    &ImageMeta {
+                        file_ids: &[],
+                        source_chat_id: None,
+                        source_message_id: None,
+                    },
+                )
+                .await
+                {
                     error!(agent_id = %d.row.agent_id, "寫入 PG 失敗: {e:#}");
                 }
                 continue;
             }
 
-            let inserted = match db::postgres::insert_message(&cfg.pg, &d.row.agent_id, &d.data, 0, &ImageMeta { file_ids: &[], source_chat_id: None, source_message_id: None }).await {
+            let inserted = match db::postgres::insert_message(
+                &cfg.pg,
+                &d.row.agent_id,
+                &d.data,
+                0,
+                &ImageMeta {
+                    file_ids: &[],
+                    source_chat_id: None,
+                    source_message_id: None,
+                },
+            )
+            .await
+            {
                 Ok(ins) => ins,
                 Err(e) => {
                     error!(agent_id = %d.row.agent_id, "寫入 PG 失敗: {e:#}");
@@ -365,11 +407,7 @@ async fn process_pending_batch(items: Vec<db::postgres::PendingIngestRow>, cfg: 
     info!(count, "批次入庫完成");
 }
 
-fn rrf_fuse(
-    vector_hits: &[SearchHit],
-    bm25_hits: &[SearchHit],
-    top_k: usize,
-) -> Vec<RankedResult> {
+fn rrf_fuse(vector_hits: &[SearchHit], bm25_hits: &[SearchHit], top_k: usize) -> Vec<RankedResult> {
     // doc_id → (rrf_score_sum, original_text, created_at)
     let mut scores: HashMap<Uuid, (f64, String, DateTime<Utc>)> = HashMap::new();
 
@@ -404,7 +442,11 @@ fn rrf_fuse(
         })
         .collect();
 
-    results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    results.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     results.truncate(top_k);
     results
 }

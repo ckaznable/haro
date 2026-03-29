@@ -116,7 +116,14 @@ pub(crate) async fn run_heartbeat(task: HeartbeatTask) -> Result<()> {
             task.agent_prompt, task.heartbeat_prompt
         );
 
-        let result = api::chat_with_tools(task.llm.as_ref(), &system, "心跳觸發，請執行任務。", &tools, None).await;
+        let result = api::chat_with_tools(
+            task.llm.as_ref(),
+            &system,
+            "心跳觸發，請執行任務。",
+            &tools,
+            None,
+        )
+        .await;
 
         match result {
             Ok(r) => {

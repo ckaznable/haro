@@ -93,9 +93,8 @@ pub fn init_agent(args: InitAgentArgs) -> Result<()> {
         }
         None => "allowed_users = []".into(),
     };
-    let config_content = format!(
-        "[[channels]]\nchannel_type = \"{channel_type}\"\n{token_line}\n{users_line}\n"
-    );
+    let config_content =
+        format!("[[channels]]\nchannel_type = \"{channel_type}\"\n{token_line}\n{users_line}\n");
     write_file(&agent_dir, "config.toml", &config_content)?;
 
     write_file(&agent_dir, "SOUL.md", &soul)?;
@@ -254,7 +253,11 @@ fn ask_optional(label: &str) -> Result<Option<String>> {
     let mut line = String::new();
     io::stdin().read_line(&mut line)?;
     let v = line.trim();
-    Ok(if v.is_empty() { None } else { Some(v.to_owned()) })
+    Ok(if v.is_empty() {
+        None
+    } else {
+        Some(v.to_owned())
+    })
 }
 
 /// 詢問 Markdown 檔案內容，提供三種選項

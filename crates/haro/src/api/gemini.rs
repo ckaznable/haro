@@ -52,7 +52,11 @@ struct FileData {
 
 impl ContentPart {
     fn text(s: impl Into<String>) -> Self {
-        Self { text: Some(s.into()), inline_data: None, file_data: None }
+        Self {
+            text: Some(s.into()),
+            inline_data: None,
+            file_data: None,
+        }
     }
 
     fn image(mime_type: &str, bytes: &[u8]) -> Self {
@@ -291,7 +295,14 @@ struct ToolRequestPart {
 
 impl ToolRequestPart {
     fn text(s: String) -> Self {
-        Self { text: Some(s), inline_data: None, function_call: None, function_response: None, thought: None, thought_signature: None }
+        Self {
+            text: Some(s),
+            inline_data: None,
+            function_call: None,
+            function_response: None,
+            thought: None,
+            thought_signature: None,
+        }
     }
     fn image(mime_type: &str, bytes: &[u8]) -> Self {
         Self {
@@ -307,7 +318,14 @@ impl ToolRequestPart {
         }
     }
     fn function_response(fr: FnResponseData) -> Self {
-        Self { text: None, inline_data: None, function_call: None, function_response: Some(fr), thought: None, thought_signature: None }
+        Self {
+            text: None,
+            inline_data: None,
+            function_call: None,
+            function_response: Some(fr),
+            thought: None,
+            thought_signature: None,
+        }
     }
 }
 
@@ -569,12 +587,16 @@ impl EmbeddingProvider for GeminiProvider {
         if !resp.status().is_success() {
             let status = resp.status();
             let body_text = resp.text().await.unwrap_or_default();
-            if cleanup { self.cleanup_files(uploaded).await; }
+            if cleanup {
+                self.cleanup_files(uploaded).await;
+            }
             anyhow::bail!("Embedding API 錯誤 {status}: {body_text}");
         }
 
         let result: EmbedResponse = resp.json().await.context("解析 Embedding 回應失敗")?;
-        if cleanup { self.cleanup_files(uploaded).await; }
+        if cleanup {
+            self.cleanup_files(uploaded).await;
+        }
         Ok(result.embedding.values)
     }
 
@@ -615,10 +637,8 @@ impl EmbeddingProvider for GeminiProvider {
             anyhow::bail!("Batch Embedding API 錯誤 {status}: {body}");
         }
 
-        let result: BatchEmbedResponse = resp
-            .json()
-            .await
-            .context("解析 Batch Embedding 回應失敗")?;
+        let result: BatchEmbedResponse =
+            resp.json().await.context("解析 Batch Embedding 回應失敗")?;
 
         Ok(result.embeddings.into_iter().map(|e| e.values).collect())
     }
@@ -750,9 +770,7 @@ impl LlmProvider for GeminiProvider {
             .collect();
 
         let instruction = params.system.map(|s| ToolInstruction {
-            parts: [ToolTextPart {
-                text: s.to_owned(),
-            }],
+            parts: [ToolTextPart { text: s.to_owned() }],
         });
 
         let mut user_parts = vec![ToolRequestPart::text(params.user_message.to_owned())];
@@ -772,7 +790,10 @@ impl LlmProvider for GeminiProvider {
         for _ in 0..MAX_ROUNDS {
             // Gemini 不支援 google_search 與 function calling 同時使用
             let tools_array = vec![
-                serde_json::to_value(ToolSpec { function_declarations: &fn_decls }).unwrap(),
+                serde_json::to_value(ToolSpec {
+                    function_declarations: &fn_decls,
+                })
+                .unwrap(),
             ];
 
             let body = ToolGenerateRequest {
@@ -927,7 +948,9 @@ fn extract_sse_data(buf: &mut String) -> Option<String> {
     let start = buf.find(data_prefix)?;
     let content_start = start + data_prefix.len();
     // 找到事件結尾（雙換行）
-    let end = buf[content_start..].find("\n\n").or_else(|| buf[content_start..].find("\r\n\r\n"))?;
+    let end = buf[content_start..]
+        .find("\n\n")
+        .or_else(|| buf[content_start..].find("\r\n\r\n"))?;
     let data = buf[content_start..content_start + end].to_owned();
     buf.drain(..content_start + end + 2); // +2 for \n\n
     Some(data)
@@ -948,7 +971,8 @@ fn merge_sse_part(parts: &mut Vec<ToolResponsePart>, part: ToolResponsePart) {
     if let Some(text) = &part.text {
         if let Some(last) = parts.last_mut() {
             let last_is_thought = last.thought.unwrap_or(false);
-            if last.text.is_some() && last.function_call.is_none() && last_is_thought == is_thought {
+            if last.text.is_some() && last.function_call.is_none() && last_is_thought == is_thought
+            {
                 last.text.as_mut().unwrap().push_str(text);
                 return;
             }

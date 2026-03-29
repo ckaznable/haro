@@ -21,10 +21,7 @@ pub struct ImageInput {
 /// Embedding 服務提供者抽象（可獨立於 LLM 替換，例如本地模型 / Cohere / Voyage）
 pub trait EmbeddingProvider: Send + Sync {
     /// 文本 → 向量
-    fn embed(
-        &self,
-        text: &str,
-    ) -> impl std::future::Future<Output = Result<Vec<f32>>> + Send;
+    fn embed(&self, text: &str) -> impl std::future::Future<Output = Result<Vec<f32>>> + Send;
 
     /// 多模態 → 向量（文字 + 圖片）
     fn embed_multimodal(
@@ -60,10 +57,7 @@ pub struct GenerateResult {
 /// LLM 服務提供者抽象（OpenAI / Anthropic / Gemini / 本地模型）
 pub trait LlmProvider: Send + Sync {
     /// 計算文本的 token 數量
-    fn count_tokens(
-        &self,
-        text: &str,
-    ) -> impl std::future::Future<Output = Result<i32>> + Send;
+    fn count_tokens(&self, text: &str) -> impl std::future::Future<Output = Result<i32>> + Send;
 
     /// 通用文本生成（支援多模態輸入）
     fn generate(

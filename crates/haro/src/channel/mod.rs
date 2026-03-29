@@ -59,9 +59,7 @@ pub type MessageHandler = Arc<
 
 /// 指令處理函式型別：接收 (sender_id, args)，回傳回應文字
 pub type CommandFn = Arc<
-    dyn Fn(String, String) -> Pin<Box<dyn Future<Output = Result<String>> + Send>>
-        + Send
-        + Sync,
+    dyn Fn(String, String) -> Pin<Box<dyn Future<Output = Result<String>> + Send>> + Send + Sync,
 >;
 
 /// 已註冊的指令定義
@@ -146,7 +144,10 @@ impl CommandRegistry {
 /// 頻道通知器：可主動向頻道發送訊息（用於心跳任務等）
 pub trait Notifier: Send + Sync {
     /// 發送訊息到頻道
-    fn send<'a>(&'a self, message: &'a str) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
+    fn send<'a>(
+        &'a self,
+        message: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
 }
 
 /// 訊息頻道抽象（Telegram / Discord / LINE / ...）
@@ -292,9 +293,7 @@ mod tests {
             "echo",
             "echo",
             "/echo",
-            Arc::new(|_sender, args| {
-                Box::pin(async move { Ok(format!("got: {args}")) })
-            }),
+            Arc::new(|_sender, args| Box::pin(async move { Ok(format!("got: {args}")) })),
         );
 
         let handler = reg.resolve("echo").unwrap();

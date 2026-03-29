@@ -8,7 +8,9 @@ use teloxide::types::{BotCommand, ChatAction, ParseMode, ReactionType};
 use tokio::task::AbortHandle;
 use tracing::{error, info, warn};
 
-use super::{Channel, CommandRegistry, ImageData, IncomingMessage, MessageHandler, Notifier, ReplyHandle};
+use super::{
+    Channel, CommandRegistry, ImageData, IncomingMessage, MessageHandler, Notifier, ReplyHandle,
+};
 
 /// 活躍任務的 abort handles（handler + typing）
 type ActiveTask = Arc<std::sync::Mutex<Option<(AbortHandle, AbortHandle)>>>;
@@ -125,23 +127,35 @@ fn format_forward_origin(msg: &Message) -> String {
     };
 
     match origin {
-        MessageOrigin::User { date, sender_user, .. } => {
-            let name = sender_user.username.as_ref()
+        MessageOrigin::User {
+            date, sender_user, ..
+        } => {
+            let name = sender_user
+                .username
+                .as_ref()
                 .map(|u| format!("@{u}"))
                 .unwrap_or_else(|| sender_user.full_name());
             format!("[轉發自 {name}，{date}]")
         }
-        MessageOrigin::HiddenUser { date, sender_user_name, .. } => {
+        MessageOrigin::HiddenUser {
+            date,
+            sender_user_name,
+            ..
+        } => {
             format!("[轉發自 {sender_user_name}，{date}]")
         }
-        MessageOrigin::Chat { date, sender_chat, .. } => {
-            let name = sender_chat.username()
+        MessageOrigin::Chat {
+            date, sender_chat, ..
+        } => {
+            let name = sender_chat
+                .username()
                 .map(|u| format!("@{u}"))
                 .unwrap_or_else(|| sender_chat.title().unwrap_or("未知群組").to_owned());
             format!("[轉發自 {name}，{date}]")
         }
         MessageOrigin::Channel { date, chat, .. } => {
-            let name = chat.username()
+            let name = chat
+                .username()
                 .map(|u| format!("@{u}"))
                 .unwrap_or_else(|| chat.title().unwrap_or("未知頻道").to_owned());
             format!("[轉發自頻道 {name}，{date}]")
@@ -200,7 +214,10 @@ pub struct TelegramNotifier {
 }
 
 impl Notifier for TelegramNotifier {
-    fn send<'a>(&'a self, message: &'a str) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
+    fn send<'a>(
+        &'a self,
+        message: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
         Box::pin(async move {
             let chat_ids: Vec<ChatId> = self
                 .known_chat_ids
@@ -272,16 +289,13 @@ impl Channel for TelegramChannel {
                             // 檢查允許名單
                             if !allowed.is_empty() {
                                 let user = msg.from.as_ref();
-                                let uid =
-                                    user.map(|u| u.id.0.to_string()).unwrap_or_default();
+                                let uid = user.map(|u| u.id.0.to_string()).unwrap_or_default();
                                 let uname = user
                                     .and_then(|u| u.username.as_ref())
                                     .map(|n| format!("@{n}"));
 
                                 let ok = allowed.contains(&uid)
-                                    || uname
-                                        .as_ref()
-                                        .is_some_and(|n| allowed.contains(n));
+                                    || uname.as_ref().is_some_and(|n| allowed.contains(n));
 
                                 if !ok {
                                     warn!(uid, ?uname, "未授權的使用者，忽略訊息");
@@ -311,7 +325,12 @@ impl Channel for TelegramChannel {
                                             info!("使用者中斷了正在處理的任務");
                                             send_reply(&bot, msg.chat.id, "已中斷處理。").await;
                                         } else {
-                                            send_reply(&bot, msg.chat.id, "目前沒有正在處理的任務。").await;
+                                            send_reply(
+                                                &bot,
+                                                msg.chat.id,
+                                                "目前沒有正在處理的任務。",
+                                            )
+                                            .await;
                                         }
                                         return respond(());
                                     }
@@ -367,7 +386,8 @@ impl Channel for TelegramChannel {
                             });
 
                             // 建立串流進度通道
-                            let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+                            let (progress_tx, mut progress_rx) =
+                                tokio::sync::mpsc::unbounded_channel::<String>();
                             let progress_bot = bot.clone();
                             let progress_chat_id = msg.chat.id;
                             tokio::spawn(async move {
@@ -388,14 +408,15 @@ impl Channel for TelegramChannel {
                             };
 
                             // 將 handler 作為獨立 task 執行，以便 /stop 可中斷
-                            let handler_task = tokio::spawn(async move {
-                                handler(incoming).await
-                            });
+                            let handler_task = tokio::spawn(async move { handler(incoming).await });
 
                             // 儲存 abort handles
                             {
                                 let mut guard = active_task.lock().unwrap();
-                                *guard = Some((handler_task.abort_handle(), typing_handle.abort_handle()));
+                                *guard = Some((
+                                    handler_task.abort_handle(),
+                                    typing_handle.abort_handle(),
+                                ));
                             }
 
                             let result = match handler_task.await {
@@ -408,9 +429,7 @@ impl Channel for TelegramChannel {
                                 Err(e) => {
                                     typing_handle.abort();
                                     error!("Handler panicked: {e}");
-                                    let _ = bot
-                                        .send_message(msg.chat.id, "內部錯誤")
-                                        .await;
+                                    let _ = bot.send_message(msg.chat.id, "內部錯誤").await;
                                     return respond(());
                                 }
                             };

@@ -87,9 +87,7 @@ impl ProviderConfig {
             match std::env::var(env_name) {
                 Ok(v) => self.api_key = v,
                 Err(_) if self.api_key.is_empty() => {
-                    anyhow::bail!(
-                        "{section}.api_key_env 指向 {env_name}，但該環境變數未設定"
-                    );
+                    anyhow::bail!("{section}.api_key_env 指向 {env_name}，但該環境變數未設定");
                 }
                 Err(_) => {} // env 沒設定但 api_key 有值，保留原值
             }
@@ -117,10 +115,10 @@ impl AppConfig {
     pub fn load() -> Result<Self> {
         let path = Self::find_config_path()?;
         info!("載入設定檔: {}", path.display());
-        let content =
-            std::fs::read_to_string(&path).with_context(|| format!("無法讀取設定檔: {}", path.display()))?;
-        let mut cfg: Self =
-            toml::from_str(&content).with_context(|| format!("解析設定檔失敗: {}", path.display()))?;
+        let content = std::fs::read_to_string(&path)
+            .with_context(|| format!("無法讀取設定檔: {}", path.display()))?;
+        let mut cfg: Self = toml::from_str(&content)
+            .with_context(|| format!("解析設定檔失敗: {}", path.display()))?;
 
         // 環境變數覆蓋
         if let Ok(v) = std::env::var("DATABASE_URL") {

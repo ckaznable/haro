@@ -63,10 +63,7 @@ impl Tool for FetchTool {
         args: serde_json::Value,
     ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + '_>> {
         Box::pin(async move {
-            let url = args
-                .get("url")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default();
+            let url = args.get("url").and_then(|v| v.as_str()).unwrap_or_default();
 
             if url.is_empty() {
                 return Ok("錯誤：未提供 URL".into());
@@ -132,10 +129,9 @@ pub(crate) fn clean_html_content(html: &str) -> String {
     //    在閉包中驗證標籤配對正確後才合併（避免 backreference）。
     //    只在內容為純文字（[^<]*）時匹配，確保不會跨兄弟節點合併。
     //    反覆套用直到穩定，從最內層往外逐步展開。
-    let nest_re = Regex::new(
-        r"<([a-zA-Z]\w*)>\s*<([a-zA-Z]\w*)>([^<]*)</([a-zA-Z]\w*)>\s*</([a-zA-Z]\w*)>",
-    )
-    .unwrap();
+    let nest_re =
+        Regex::new(r"<([a-zA-Z]\w*)>\s*<([a-zA-Z]\w*)>([^<]*)</([a-zA-Z]\w*)>\s*</([a-zA-Z]\w*)>")
+            .unwrap();
     loop {
         let prev = result.clone();
         result = nest_re
@@ -164,11 +160,7 @@ pub(crate) fn clean_html_content(html: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{
-        Router,
-        http::header,
-        routing::get,
-    };
+    use axum::{Router, http::header, routing::get};
 
     /// 啟動測試用 HTTP server，回傳 base URL
     async fn start_server(router: Router) -> String {
@@ -263,7 +255,10 @@ mod tests {
         let base = start_server(app).await;
 
         let t = fetch_tool();
-        let result = t.call(json!({ "url": format!("{base}/text") })).await.unwrap();
+        let result = t
+            .call(json!({ "url": format!("{base}/text") }))
+            .await
+            .unwrap();
 
         assert!(result.contains("[HTTP 200 OK]"));
         assert!(result.contains("hello"));
@@ -283,7 +278,10 @@ mod tests {
         let base = start_server(app).await;
 
         let t = fetch_tool();
-        let result = t.call(json!({ "url": format!("{base}/page") })).await.unwrap();
+        let result = t
+            .call(json!({ "url": format!("{base}/page") }))
+            .await
+            .unwrap();
 
         // 屬性已去除 + 嵌套已扁平化
         assert!(result.contains("<div>content</div>"));
@@ -295,9 +293,7 @@ mod tests {
         let html = r#"<div class="keep"><span>text</span></div>"#;
         let app = Router::new().route(
             "/raw",
-            get(move || async move {
-                ([(header::CONTENT_TYPE, "text/html")], html)
-            }),
+            get(move || async move { ([(header::CONTENT_TYPE, "text/html")], html) }),
         );
         let base = start_server(app).await;
 
@@ -326,7 +322,10 @@ mod tests {
         let base = start_server(app).await;
 
         let t = fetch_tool();
-        let result = t.call(json!({ "url": format!("{base}/api") })).await.unwrap();
+        let result = t
+            .call(json!({ "url": format!("{base}/api") }))
+            .await
+            .unwrap();
 
         // JSON 回應不做 HTML 清理
         assert!(result.contains(r#"class=\"x\""#));
@@ -351,7 +350,10 @@ mod tests {
         let base = start_server(app).await;
 
         let t = fetch_tool();
-        let result = t.call(json!({ "url": format!("{base}/echo-accept") })).await.unwrap();
+        let result = t
+            .call(json!({ "url": format!("{base}/echo-accept") }))
+            .await
+            .unwrap();
 
         assert!(result.contains("text/markdown"));
         assert!(result.contains("text/html"));
@@ -378,7 +380,10 @@ mod tests {
         let base = start_server(app).await;
 
         let t = fetch_tool();
-        let result = t.call(json!({ "url": format!("{base}/long") })).await.unwrap();
+        let result = t
+            .call(json!({ "url": format!("{base}/long") }))
+            .await
+            .unwrap();
 
         assert!(result.contains("已截斷"));
         // 內容應被截斷到 MAX_RESPONSE_CHARS

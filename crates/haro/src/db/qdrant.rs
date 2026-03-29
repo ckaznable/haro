@@ -2,12 +2,12 @@ use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 use chrono::DateTime;
+use qdrant_client::Qdrant;
 use qdrant_client::qdrant::{
     Condition, CreateCollectionBuilder, CreateFieldIndexCollectionBuilder, Distance, FieldType,
     Filter, ListValue, PointStruct, SearchPointsBuilder, UpsertPointsBuilder, Value,
     VectorParamsBuilder, point_id::PointIdOptions, value::Kind,
 };
-use qdrant_client::Qdrant;
 use tracing::info;
 use uuid::Uuid;
 
@@ -95,10 +95,7 @@ pub async fn upsert_point(
 ) -> Result<()> {
     let kw_list = Value {
         kind: Some(Kind::ListValue(ListValue {
-            values: keywords
-                .iter()
-                .map(|k| Value::from(k.clone()))
-                .collect(),
+            values: keywords.iter().map(|k| Value::from(k.clone())).collect(),
         })),
     };
 

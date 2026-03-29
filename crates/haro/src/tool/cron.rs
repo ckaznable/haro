@@ -75,7 +75,9 @@ pub fn save_config(path: &std::path::Path, config: &CronConfig) -> Result<()> {
 fn validate_cron(expr: &str) -> Result<(), String> {
     // cron crate 需要 7 欄位（秒 分 時 日 月 週 年），我們接受 5 欄位並補上秒和年
     let full = format!("0 {expr} *");
-    cron::Schedule::from_str(&full).map(|_| ()).map_err(|e| e.to_string())
+    cron::Schedule::from_str(&full)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 /// 格式化任務列表為可讀文字
@@ -88,10 +90,20 @@ fn format_jobs(jobs: &[CronJob]) -> String {
         .map(|(i, j)| {
             let status = if j.enabled { "啟用" } else { "停用" };
             let prompt_preview: String = j.prompt.chars().take(60).collect();
-            let ellipsis = if j.prompt.chars().count() > 60 { "…" } else { "" };
+            let ellipsis = if j.prompt.chars().count() > 60 {
+                "…"
+            } else {
+                ""
+            };
             format!(
                 "#{} {} [{}] ({}, {})\n  cron: {}\n  prompt: {}{ellipsis}",
-                i + 1, j.id, status, j.executor, j.cron, j.cron, prompt_preview
+                i + 1,
+                j.id,
+                status,
+                j.executor,
+                j.cron,
+                j.cron,
+                prompt_preview
             )
         })
         .collect::<Vec<_>>()
@@ -192,8 +204,14 @@ impl Tool for AddCronTool {
     ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + '_>> {
         Box::pin(async move {
             let id = args.get("id").and_then(|v| v.as_str()).unwrap_or_default();
-            let cron_expr = args.get("cron").and_then(|v| v.as_str()).unwrap_or_default();
-            let prompt = args.get("prompt").and_then(|v| v.as_str()).unwrap_or_default();
+            let cron_expr = args
+                .get("cron")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            let prompt = args
+                .get("prompt")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
             let executor: Executor = args
                 .get("executor")
                 .and_then(|v| v.as_str())
@@ -368,16 +386,24 @@ pub fn handle_slash_command(cron_path: &std::path::Path, args: &str) -> Result<S
         return Ok(format_jobs(&config.jobs));
     }
 
-    if let Some(id_or_num) = args.strip_prefix("remove ").or_else(|| args.strip_prefix("rm ")) {
+    if let Some(id_or_num) = args
+        .strip_prefix("remove ")
+        .or_else(|| args.strip_prefix("rm "))
+    {
         let id_or_num = id_or_num.trim();
         let mut config = load_config(cron_path)?;
 
         // 支援編號刪除（#N 或純數字）
-        let id = if let Some(n) = id_or_num.strip_prefix('#').and_then(|s| s.parse::<usize>().ok())
+        let id = if let Some(n) = id_or_num
+            .strip_prefix('#')
+            .and_then(|s| s.parse::<usize>().ok())
             .or_else(|| id_or_num.parse::<usize>().ok())
         {
             if n == 0 || n > config.jobs.len() {
-                return Ok(format!("編號 #{n} 不存在，共 {} 筆任務。", config.jobs.len()));
+                return Ok(format!(
+                    "編號 #{n} 不存在，共 {} 筆任務。",
+                    config.jobs.len()
+                ));
             }
             config.jobs[n - 1].id.clone()
         } else {
@@ -436,7 +462,10 @@ fn add_job_from_args(cron_path: &std::path::Path, rest: &str) -> Result<String> 
     }
 
     let id = parts[0];
-    let cron_expr = format!("{} {} {} {} {}", parts[1], parts[2], parts[3], parts[4], parts[5]);
+    let cron_expr = format!(
+        "{} {} {} {} {}",
+        parts[1], parts[2], parts[3], parts[4], parts[5]
+    );
     let prompt = parts[6];
 
     if let Err(e) = validate_cron(&cron_expr) {

@@ -57,10 +57,7 @@ impl Tool for SearxngTool {
     }
 
     fn display_call(&self, args: &serde_json::Value) -> Option<String> {
-        let query = args
-            .get("query")
-            .and_then(|v| v.as_str())
-            .unwrap_or("...");
+        let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("...");
         Some(format!("搜尋 {query}"))
     }
 
@@ -84,11 +81,7 @@ impl Tool for SearxngTool {
                 .append_pair("q", query)
                 .append_pair("format", "json");
 
-            let resp = self
-                .http
-                .get(url)
-                .send()
-                .await?;
+            let resp = self.http.get(url).send().await?;
 
             if !resp.status().is_success() {
                 let status = resp.status();
@@ -107,9 +100,7 @@ impl Tool for SearxngTool {
                 .iter()
                 .take(5)
                 .enumerate()
-                .map(|(i, r)| {
-                    format!("[{}] {}\n{}\n{}", i + 1, r.title, r.url, r.content)
-                })
+                .map(|(i, r)| format!("[{}] {}\n{}\n{}", i + 1, r.title, r.url, r.content))
                 .collect::<Vec<_>>()
                 .join("\n\n");
 

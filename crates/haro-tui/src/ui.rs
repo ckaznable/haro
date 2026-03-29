@@ -1,9 +1,11 @@
 use std::io;
 
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyModifiers};
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::ExecutableCommand;
+use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use crossterm::terminal::{
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+};
 use ratatui::prelude::*;
 use ratatui::widgets::*;
 use sqlx::PgPool;
@@ -113,9 +115,13 @@ impl App {
     }
 
     async fn load_usage(&mut self) -> Result<()> {
-        self.usage_rows =
-            db::get_token_usage(&self.pool, self.agent_filter(), PAGE_SIZE, self.usage_offset)
-                .await?;
+        self.usage_rows = db::get_token_usage(
+            &self.pool,
+            self.agent_filter(),
+            PAGE_SIZE,
+            self.usage_offset,
+        )
+        .await?;
         if self.usage_rows.is_empty() {
             self.usage_state.select(None);
         } else if self.usage_state.selected().is_none() {
@@ -235,10 +241,15 @@ impl App {
                     if let Some(row) = self.usage_rows.get(i) {
                         self.detail = Some(format!(
                             "ID: {}\nAgent: {}\nModel: {}\nInput: {} tokens\nOutput: {} tokens\nTotal: {} tokens\nTime: {}",
-                            row.id, row.agent_id, row.model,
-                            row.input_tokens, row.output_tokens,
+                            row.id,
+                            row.agent_id,
+                            row.model,
+                            row.input_tokens,
+                            row.output_tokens,
                             row.input_tokens + row.output_tokens,
-                            row.created_at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S"),
+                            row.created_at
+                                .with_timezone(&chrono::Local)
+                                .format("%Y-%m-%d %H:%M:%S"),
                         ));
                     }
                 }
@@ -248,10 +259,18 @@ impl App {
                     if let Some(row) = self.daily_rows.get(i) {
                         self.detail = Some(format!(
                             "Date: {}\nAgent: {}\nModel: {}\nCalls: {}\nInput: {} tokens\nOutput: {} tokens\nTotal: {} tokens\nAvg/call: {} tokens",
-                            row.day.format("%Y-%m-%d"), row.agent_id, row.model,
-                            row.call_count, row.total_input, row.total_output,
+                            row.day.format("%Y-%m-%d"),
+                            row.agent_id,
+                            row.model,
+                            row.call_count,
+                            row.total_input,
+                            row.total_output,
                             row.total_input + row.total_output,
-                            if row.call_count > 0 { (row.total_input + row.total_output) / row.call_count } else { 0 },
+                            if row.call_count > 0 {
+                                (row.total_input + row.total_output) / row.call_count
+                            } else {
+                                0
+                            },
                         ));
                     }
                 }
@@ -261,9 +280,14 @@ impl App {
                     if let Some(row) = self.msg_rows.get(i) {
                         self.detail = Some(format!(
                             "ID: {}\nAgent: {}\nTokens: {}\nTime: {}\n\n--- Summary ---\n{}\n\n--- Original ---\n{}",
-                            row.id, row.bot_id, row.token_count,
-                            row.created_at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S"),
-                            row.dense_summary, row.original_text,
+                            row.id,
+                            row.bot_id,
+                            row.token_count,
+                            row.created_at
+                                .with_timezone(&chrono::Local)
+                                .format("%Y-%m-%d %H:%M:%S"),
+                            row.dense_summary,
+                            row.original_text,
                         ));
                     }
                 }
@@ -275,7 +299,7 @@ impl App {
 fn draw(frame: &mut Frame, app: &mut App) {
     let chunks = Layout::vertical([
         Constraint::Length(3), // tabs + agent filter
-        Constraint::Min(0),   // main content
+        Constraint::Min(0),    // main content
         Constraint::Length(1), // status bar
     ])
     .split(frame.area());
@@ -285,7 +309,9 @@ fn draw(frame: &mut Frame, app: &mut App) {
         .iter()
         .map(|t| {
             let style = if *t == app.tab {
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(Color::DarkGray)
             };
@@ -318,11 +344,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
             app.usage_offset
         ),
         Tab::Daily => format!("rows: {} | days: {}", app.daily_rows.len(), app.daily_days),
-        Tab::Messages => format!(
-            "rows: {} | offset: {}",
-            app.msg_rows.len(),
-            app.msg_offset
-        ),
+        Tab::Messages => format!("rows: {} | offset: {}", app.msg_rows.len(), app.msg_offset),
     };
     let status = Line::from(vec![
         " q".fg(Color::Yellow),
@@ -360,7 +382,11 @@ fn draw(frame: &mut Frame, app: &mut App) {
 
 fn draw_usage(frame: &mut Frame, app: &mut App, area: Rect) {
     let header = Row::new(["Time", "Agent", "Model", "Input", "Output", "Total"])
-        .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        .style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
         .bottom_margin(0);
 
     let rows: Vec<Row> = app
@@ -400,8 +426,14 @@ fn draw_usage(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_daily(frame: &mut Frame, app: &mut App, area: Rect) {
-    let header = Row::new(["Date", "Agent", "Model", "Calls", "Input", "Output", "Total"])
-        .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+    let header = Row::new([
+        "Date", "Agent", "Model", "Calls", "Input", "Output", "Total",
+    ])
+    .style(
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    );
 
     let rows: Vec<Row> = app
         .daily_rows
@@ -432,18 +464,18 @@ fn draw_daily(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let table = Table::new(rows, widths)
         .header(header)
-        .block(Block::bordered().title(format!(
-            " Daily Summary (last {} days) ",
-            app.daily_days
-        )))
+        .block(Block::bordered().title(format!(" Daily Summary (last {} days) ", app.daily_days)))
         .row_highlight_style(Style::default().bg(Color::DarkGray));
 
     frame.render_stateful_widget(table, area, &mut app.daily_state);
 }
 
 fn draw_messages(frame: &mut Frame, app: &mut App, area: Rect) {
-    let header = Row::new(["Time", "Agent", "Tokens", "Summary"])
-        .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+    let header = Row::new(["Time", "Agent", "Tokens", "Summary"]).style(
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    );
 
     let rows: Vec<Row> = app
         .msg_rows

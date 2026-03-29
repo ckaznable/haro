@@ -7,7 +7,7 @@ use crate::config::AppConfig;
 use crate::{db, tool};
 
 use super::scheduler;
-use super::{handle_query, MessageContext};
+use super::{MessageContext, handle_query};
 
 /// 註冊所有 slash 指令所需的上下文
 pub(crate) struct CmdContext<'a> {
@@ -48,7 +48,9 @@ fn register_basic(reg: &mut CommandRegistry) {
         "stop",
         "中斷正在處理的任務",
         "/stop",
-        Arc::new(|_sender, _args| Box::pin(async { Ok("此指令由頻道直接處理。".into()) })),
+        Arc::new(|_sender, _args| {
+            Box::pin(async { Ok("此指令由頻道直接處理。".into()) })
+        }),
     );
 
     reg.register(
@@ -213,7 +215,8 @@ fn register_scheduler(reg: &mut CommandRegistry, ctx: &CmdContext<'_>) {
                         cron 表達式為標準 5 欄位格式（分 時 日 月 週）。\
                         executor 可選 worker（快速）、llm（主模型）、brain（最強）。\
                         完成後用簡短中文回報結果。";
-                    let result = api::chat_with_tools(worker.as_ref(), system, &args, &tools, None).await?;
+                    let result =
+                        api::chat_with_tools(worker.as_ref(), system, &args, &tools, None).await?;
                     if let Ok(config) = tool::cron::load_config(&cp) {
                         let running = pool.running_ids();
                         for job in config.jobs.iter().filter(|j| j.enabled) {
@@ -272,7 +275,8 @@ fn register_scheduler(reg: &mut CommandRegistry, ctx: &CmdContext<'_>) {
                         時間格式支援 ISO 8601 或 YYYY-MM-DD HH:MM。\
                         executor 可選 worker（快速）、llm（主模型）、brain（最強）。\
                         完成後用簡短中文回報結果。";
-                    let result = api::chat_with_tools(worker.as_ref(), system, &args, &tools, None).await?;
+                    let result =
+                        api::chat_with_tools(worker.as_ref(), system, &args, &tools, None).await?;
                     if let Ok(config) = tool::task::load_config(&tp) {
                         let running = pool.running_ids();
                         for task in &config.tasks {
@@ -489,7 +493,11 @@ fn register_tools(reg: &mut CommandRegistry, ctx: &CmdContext<'_>) {
                     .iter()
                     .map(|d| format!("• {} — {}", d.name, d.description))
                     .collect();
-                Ok(format!("LLM 可用工具（共 {} 個）：\n{}", defs.len(), list.join("\n")))
+                Ok(format!(
+                    "LLM 可用工具（共 {} 個）：\n{}",
+                    defs.len(),
+                    list.join("\n")
+                ))
             })
         }),
     );

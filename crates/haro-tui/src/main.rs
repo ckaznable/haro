@@ -38,9 +38,9 @@ async fn main() -> Result<()> {
         .database_url
         .or_else(|| std::env::var("DATABASE_URL").ok())
         .or_else(load_database_url)
-        .ok_or_else(|| anyhow::anyhow!(
-            "需要資料庫連線：--database-url 或 DATABASE_URL 環境變數或 config.toml"
-        ))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("需要資料庫連線：--database-url 或 DATABASE_URL 環境變數或 config.toml")
+        })?;
 
     let pool = db::connect(&database_url).await?;
 

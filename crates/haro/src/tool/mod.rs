@@ -131,7 +131,10 @@ mod tests {
             args: serde_json::Value,
         ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + '_>> {
             Box::pin(async move {
-                let msg = args.get("msg").and_then(|v| v.as_str()).unwrap_or("(empty)");
+                let msg = args
+                    .get("msg")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("(empty)");
                 Ok(msg.to_owned())
             })
         }

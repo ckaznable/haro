@@ -75,7 +75,10 @@ impl RunningPool {
             pool.handles.lock().unwrap().remove(&pool_key);
         });
 
-        self.handles.lock().unwrap().insert(id, handle.abort_handle());
+        self.handles
+            .lock()
+            .unwrap()
+            .insert(id, handle.abort_handle());
     }
 
     /// 啟動單一一次性任務
@@ -99,7 +102,10 @@ impl RunningPool {
             pool.handles.lock().unwrap().remove(&pool_key);
         });
 
-        self.handles.lock().unwrap().insert(id, handle.abort_handle());
+        self.handles
+            .lock()
+            .unwrap()
+            .insert(id, handle.abort_handle());
     }
 
     /// 中止指定事件

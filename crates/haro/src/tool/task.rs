@@ -56,7 +56,10 @@ fn validate_datetime(s: &str) -> Result<chrono::DateTime<chrono::FixedOffset>, S
                 .or_else(|_| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S"))
                 .map(|naive| {
                     let local_offset = chrono::Local::now().offset().fix();
-                    naive.and_local_timezone(local_offset).unwrap().fixed_offset()
+                    naive
+                        .and_local_timezone(local_offset)
+                        .unwrap()
+                        .fixed_offset()
                 })
                 .map_err(|e: chrono::ParseError| e.to_string())
         })
@@ -73,10 +76,19 @@ fn format_tasks(tasks: &[ScheduledTask]) -> String {
         .enumerate()
         .map(|(i, t)| {
             let prompt_preview: String = t.prompt.chars().take(60).collect();
-            let ellipsis = if t.prompt.chars().count() > 60 { "…" } else { "" };
+            let ellipsis = if t.prompt.chars().count() > 60 {
+                "…"
+            } else {
+                ""
+            };
             format!(
                 "#{} {} ({}, {})\n  時間: {}\n  prompt: {}{ellipsis}",
-                i + 1, t.id, t.executor, t.run_at, t.run_at, prompt_preview
+                i + 1,
+                t.id,
+                t.executor,
+                t.run_at,
+                t.run_at,
+                prompt_preview
             )
         })
         .collect::<Vec<_>>()
@@ -177,8 +189,14 @@ impl Tool for AddTaskTool {
     ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + '_>> {
         Box::pin(async move {
             let id = args.get("id").and_then(|v| v.as_str()).unwrap_or_default();
-            let run_at = args.get("run_at").and_then(|v| v.as_str()).unwrap_or_default();
-            let prompt = args.get("prompt").and_then(|v| v.as_str()).unwrap_or_default();
+            let run_at = args
+                .get("run_at")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            let prompt = args
+                .get("prompt")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
             let executor: Executor = args
                 .get("executor")
                 .and_then(|v| v.as_str())
@@ -353,16 +371,24 @@ pub fn handle_slash_command(tasks_path: &std::path::Path, args: &str) -> Result<
         return Ok(format_tasks(&config.tasks));
     }
 
-    if let Some(id_or_num) = args.strip_prefix("remove ").or_else(|| args.strip_prefix("rm ")) {
+    if let Some(id_or_num) = args
+        .strip_prefix("remove ")
+        .or_else(|| args.strip_prefix("rm "))
+    {
         let id_or_num = id_or_num.trim();
         let mut config = load_config(tasks_path)?;
 
         // 支援編號刪除（#N 或純數字）
-        let id = if let Some(n) = id_or_num.strip_prefix('#').and_then(|s| s.parse::<usize>().ok())
+        let id = if let Some(n) = id_or_num
+            .strip_prefix('#')
+            .and_then(|s| s.parse::<usize>().ok())
             .or_else(|| id_or_num.parse::<usize>().ok())
         {
             if n == 0 || n > config.tasks.len() {
-                return Ok(format!("編號 #{n} 不存在，共 {} 筆任務。", config.tasks.len()));
+                return Ok(format!(
+                    "編號 #{n} 不存在，共 {} 筆任務。",
+                    config.tasks.len()
+                ));
             }
             config.tasks[n - 1].id.clone()
         } else {

@@ -24,10 +24,7 @@ pub fn list_skill_entries(skills_path: &Path) -> Vec<(String, String)> {
             let content = std::fs::read_to_string(e.path()).ok()?;
             let first_line = content.lines().next().unwrap_or("").trim().to_owned();
             // 去掉 markdown heading 前綴
-            let desc = first_line
-                .trim_start_matches('#')
-                .trim()
-                .to_owned();
+            let desc = first_line.trim_start_matches('#').trim().to_owned();
             Some((name, desc))
         })
         .collect();
@@ -164,7 +161,11 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let skills = dir.path();
         fs::write(skills.join("coding.md"), "# Coding\nWrite clean code.").unwrap();
-        fs::write(skills.join("translate.md"), "# Translation\nTranslate text.").unwrap();
+        fs::write(
+            skills.join("translate.md"),
+            "# Translation\nTranslate text.",
+        )
+        .unwrap();
         fs::write(skills.join("empty.md"), "").unwrap();
         fs::write(skills.join("not_a_skill.txt"), "ignored").unwrap();
         dir
@@ -259,7 +260,10 @@ mod tests {
     async fn get_skill_path_traversal_blocked() {
         let dir = setup_skills_dir();
         let tool_list = tools(dir.path().to_path_buf());
-        let result = tool_list[1].call(json!({"name": "../etc/passwd"})).await.unwrap();
+        let result = tool_list[1]
+            .call(json!({"name": "../etc/passwd"}))
+            .await
+            .unwrap();
         assert!(result.contains("無效"));
     }
 

@@ -147,11 +147,7 @@ pub async fn search_bm25(
 
 /// 取得近期訊息作為對話歷史，累積 token 數不超過 max_tokens
 /// 回傳按時間正序（舊→新），每筆為 original_text
-pub async fn get_history(
-    pool: &PgPool,
-    bot_id: &str,
-    max_tokens: i32,
-) -> Result<Vec<String>> {
+pub async fn get_history(pool: &PgPool, bot_id: &str, max_tokens: i32) -> Result<Vec<String>> {
     // 用視窗函式累積 token，在 SQL 層就截斷
     let rows: Vec<(String,)> = sqlx::query_as(
         "SELECT original_text FROM ( \
@@ -207,15 +203,13 @@ pub async fn insert_pending_ingest(
     text: &str,
     worker_model: &str,
 ) -> Result<()> {
-    sqlx::query(
-        "INSERT INTO pending_ingest (agent_id, text, worker_model) VALUES ($1, $2, $3)",
-    )
-    .bind(agent_id)
-    .bind(text)
-    .bind(worker_model)
-    .execute(pool)
-    .await
-    .context("寫入 pending_ingest 失敗")?;
+    sqlx::query("INSERT INTO pending_ingest (agent_id, text, worker_model) VALUES ($1, $2, $3)")
+        .bind(agent_id)
+        .bind(text)
+        .bind(worker_model)
+        .execute(pool)
+        .await
+        .context("寫入 pending_ingest 失敗")?;
 
     Ok(())
 }
@@ -244,13 +238,12 @@ pub async fn fetch_pending_ingest(pool: &PgPool, limit: i64) -> Result<Vec<Pendi
 
 /// 取得某 agent 的所有待處理文字（供查詢時補充上下文）
 pub async fn get_pending_texts(pool: &PgPool, agent_id: &str) -> Result<Vec<String>> {
-    let rows: Vec<(String,)> = sqlx::query_as(
-        "SELECT text FROM pending_ingest WHERE agent_id = $1 ORDER BY created_at",
-    )
-    .bind(agent_id)
-    .fetch_all(pool)
-    .await
-    .context("讀取 pending_ingest 文字失敗")?;
+    let rows: Vec<(String,)> =
+        sqlx::query_as("SELECT text FROM pending_ingest WHERE agent_id = $1 ORDER BY created_at")
+            .bind(agent_id)
+            .fetch_all(pool)
+            .await
+            .context("讀取 pending_ingest 文字失敗")?;
 
     Ok(rows.into_iter().map(|r| r.0).collect())
 }
@@ -289,12 +282,11 @@ pub async fn upsert_scratchpad(pool: &PgPool, bot_id: &str, content: &str) -> Re
 
 /// 讀取備忘錄
 pub async fn get_scratchpad(pool: &PgPool, bot_id: &str) -> Result<Option<String>> {
-    let row: Option<(String,)> =
-        sqlx::query_as("SELECT content FROM scratchpad WHERE bot_id = $1")
-            .bind(bot_id)
-            .fetch_optional(pool)
-            .await
-            .context("讀取備忘錄失敗")?;
+    let row: Option<(String,)> = sqlx::query_as("SELECT content FROM scratchpad WHERE bot_id = $1")
+        .bind(bot_id)
+        .fetch_optional(pool)
+        .await
+        .context("讀取備忘錄失敗")?;
 
     Ok(row.map(|r| r.0))
 }
