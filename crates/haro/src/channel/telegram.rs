@@ -41,7 +41,7 @@ impl TelegramChannel {
 }
 
 /// 嘗試以 MarkdownV2 發送，若失敗則 fallback 為純文字
-async fn send_reply(bot: &Bot, chat_id: ChatId, text: &str) {
+async fn send_reply(bot: &Bot, chat_id: ChatId, text: &str) -> bool {
     if let Ok(md) = telegram_markdown_v2::convert(text) {
         let result = bot
             .send_message(chat_id, &md)
@@ -49,14 +49,17 @@ async fn send_reply(bot: &Bot, chat_id: ChatId, text: &str) {
             .await;
 
         if result.is_ok() {
-            return;
+            return true;
         }
-        warn!("MarkdownV2 發送失敗，fallback 純文字");
+        warn!(chat_id = chat_id.0, "MarkdownV2 發送失敗，fallback 純文字");
     }
 
     if let Err(e) = bot.send_message(chat_id, text).await {
-        error!("Telegram 發送回覆失敗: {e}");
+        error!(chat_id = chat_id.0, "Telegram 發送回覆失敗: {e}");
+        return false;
     }
+
+    true
 }
 
 /// 從 Telegram 訊息文字解析 slash command，回傳 (cmd_name, args)
@@ -206,8 +209,18 @@ impl Notifier for TelegramNotifier {
                 .iter()
                 .map(|&id| ChatId(id))
                 .collect();
+            if chat_ids.is_empty() {
+                warn!("Telegram notifier 沒有已知的 chat_id，主動通知略過");
+                return Ok(());
+            }
+            let mut failed = 0usize;
             for chat_id in chat_ids {
-                send_reply(&self.bot, chat_id, message).await;
+                if !send_reply(&self.bot, chat_id, message).await {
+                    failed += 1;
+                }
+            }
+            if failed > 0 {
+                error!(failed, "Telegram notifier 部分通知發送失敗");
             }
             Ok(())
         })
@@ -312,7 +325,9 @@ impl Channel for TelegramChannel {
                             {
                                 let result = cmd_handler(sender_id, args.to_owned()).await;
                                 match result {
-                                    Ok(reply) => send_reply(&bot, msg.chat.id, &reply).await,
+                                    Ok(reply) => {
+                                        send_reply(&bot, msg.chat.id, &reply).await;
+                                    }
                                     Err(e) => {
                                         let _ = bot
                                             .send_message(msg.chat.id, format!("指令失敗: {e:#}"))

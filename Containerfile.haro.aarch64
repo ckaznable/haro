@@ -1,0 +1,18 @@
+# syntax=docker/dockerfile:1.7
+
+# Runtime image for haro (linux/arm64)
+# This image does not compile Rust code; it only copies a prebuilt binary.
+FROM --platform=linux/arm64 docker.io/debian:bookworm-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+ARG BIN_PATH=container-bin/haro
+ARG BIN_NAME=haro
+
+WORKDIR /app
+COPY ${BIN_PATH} /usr/local/bin/${BIN_NAME}
+RUN chmod +x /usr/local/bin/${BIN_NAME}
+
+ENTRYPOINT ["/usr/local/bin/haro"]
