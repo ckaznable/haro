@@ -124,12 +124,12 @@ async fn main() -> Result<()> {
 
     // 載入所有 Agent（agents_dir → fallback config.toml [[channels]]）
     let agents_dir = cfg.agents_dir();
-    let mut agents = agent::load_agents(&agents_dir)?;
+    let mut agents = agent::load_agents(&agents_dir, Arc::clone(&res.pg)).await?;
 
     if agents.is_empty() {
         let enabled: Vec<_> = cfg.channels.iter().filter(|c| c.enable).cloned().collect();
         if !enabled.is_empty() {
-            let channels = agent::build_channels(&enabled)?;
+            let channels = agent::build_channels("default", &enabled, Arc::clone(&res.pg)).await?;
             info!(channels = channels.len(), "使用 config.toml 預設頻道啟動");
             agents.push(agent::Agent {
                 id: "default".into(),

@@ -290,3 +290,52 @@ pub async fn get_scratchpad(pool: &PgPool, bot_id: &str) -> Result<Option<String
 
     Ok(row.map(|r| r.0))
 }
+
+// ── Notifier targets ──
+
+/// 讀取指定 channel scope 已持久化的 notifier target IDs
+pub async fn list_notifier_target_ids(pool: &PgPool, channel_scope: &str) -> Result<Vec<String>> {
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "SELECT target_id \
+         FROM notifier_targets \
+         WHERE channel_scope = $1 \
+         ORDER BY created_at ASC",
+    )
+    .bind(channel_scope)
+    .fetch_all(pool)
+    .await
+    .context("讀取 notifier targets 失敗")?;
+
+    Ok(rows.into_iter().map(|(target_id,)| target_id).collect())
+}
+
+/// 寫入 notifier target；重複寫入時更新可選 metadata 與 last_seen_at
+pub async fn upsert_notifier_target(
+    pool: &PgPool,
+    channel_scope: &str,
+    target_id: &str,
+    username: Option<&str>,
+    display_name: Option<&str>,
+    metadata: Option<serde_json::Value>,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO notifier_targets \
+            (channel_scope, target_id, username, display_name, metadata, last_seen_at) \
+         VALUES ($1, $2, $3, $4, $5, NOW()) \
+         ON CONFLICT (channel_scope, target_id) DO UPDATE \
+         SET username = COALESCE(EXCLUDED.username, notifier_targets.username), \
+             display_name = COALESCE(EXCLUDED.display_name, notifier_targets.display_name), \
+             metadata = COALESCE(EXCLUDED.metadata, notifier_targets.metadata), \
+             last_seen_at = NOW()",
+    )
+    .bind(channel_scope)
+    .bind(target_id)
+    .bind(username)
+    .bind(display_name)
+    .bind(metadata)
+    .execute(pool)
+    .await
+    .context("寫入 notifier target 失敗")?;
+
+    Ok(())
+}

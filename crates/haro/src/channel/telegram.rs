@@ -2,11 +2,14 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use anyhow::Result;
+use sqlx::PgPool;
 use teloxide::net::Download;
 use teloxide::prelude::*;
 use teloxide::types::{BotCommand, ChatAction, ParseMode, ReactionType};
 use tokio::task::AbortHandle;
 use tracing::{error, info, warn};
+
+use crate::db;
 
 use super::{
     Channel, CommandRegistry, ImageData, IncomingMessage, MessageHandler, Notifier, ReplyHandle,
@@ -22,23 +25,42 @@ type KnownChatIds = Arc<std::sync::Mutex<HashSet<i64>>>;
 pub struct TelegramChannel {
     bot: Bot,
     allowed_users: Arc<HashSet<String>>,
+    channel_scope: Arc<String>,
+    pg: Arc<PgPool>,
     /// 動態收集的 chat_id（配合 @username 使用，訊息進來時自動記錄）
     known_chat_ids: KnownChatIds,
 }
 
 impl TelegramChannel {
     /// `allowed_users` 可放 user ID（數字）或 @username，空 = 不限制
-    pub fn new(bot_token: &str, allowed_users: &[String]) -> Self {
+    pub async fn new(
+        bot_token: &str,
+        allowed_users: &[String],
+        channel_scope: impl Into<String>,
+        pg: Arc<PgPool>,
+    ) -> Result<Self> {
+        let channel_scope = channel_scope.into();
+
         // 預先填入 allowed_users 中的純數字 ID
-        let pre_known: HashSet<i64> = allowed_users
+        let mut pre_known: HashSet<i64> = allowed_users
             .iter()
             .filter_map(|u| u.parse::<i64>().ok())
             .collect();
-        Self {
+
+        let persisted = db::postgres::list_notifier_target_ids(&pg, &channel_scope).await?;
+        pre_known.extend(
+            persisted
+                .into_iter()
+                .filter_map(|target_id| target_id.parse::<i64>().ok()),
+        );
+
+        Ok(Self {
             bot: Bot::new(bot_token),
             allowed_users: Arc::new(allowed_users.iter().cloned().collect()),
+            channel_scope: Arc::new(channel_scope),
+            pg,
             known_chat_ids: Arc::new(std::sync::Mutex::new(pre_known)),
-        }
+        })
     }
 }
 
@@ -260,6 +282,8 @@ impl Channel for TelegramChannel {
         Box::pin(async move {
             let bot = self.bot;
             let allowed_users = self.allowed_users;
+            let channel_scope = self.channel_scope;
+            let pg = self.pg;
             let known_chat_ids = self.known_chat_ids;
             let active_task: ActiveTask = Arc::new(std::sync::Mutex::new(None));
 
@@ -285,6 +309,8 @@ impl Channel for TelegramChannel {
                         let commands = Arc::clone(&commands);
                         let active_task = Arc::clone(&active_task);
                         let known_chat_ids = Arc::clone(&known_chat_ids);
+                        let channel_scope = Arc::clone(&channel_scope);
+                        let pg = Arc::clone(&pg);
                         async move {
                             // 檢查允許名單
                             if !allowed.is_empty() {
@@ -305,6 +331,29 @@ impl Channel for TelegramChannel {
 
                             // 記錄已驗證使用者的 chat_id（供 notifier 使用）
                             known_chat_ids.lock().unwrap().insert(msg.chat.id.0);
+                            let chat_username =
+                                msg.chat.username().map(|username| format!("@{username}"));
+                            let chat_display_name = msg
+                                .chat
+                                .title()
+                                .map(str::to_owned)
+                                .or_else(|| msg.from.as_ref().map(|user| user.full_name()));
+                            if let Err(e) = db::postgres::upsert_notifier_target(
+                                &pg,
+                                channel_scope.as_str(),
+                                &msg.chat.id.0.to_string(),
+                                chat_username.as_deref(),
+                                chat_display_name.as_deref(),
+                                None,
+                            )
+                            .await
+                            {
+                                warn!(
+                                    chat_id = msg.chat.id.0,
+                                    channel_scope = channel_scope.as_str(),
+                                    "持久化 Telegram known chat ID 失敗: {e}"
+                                );
+                            }
 
                             let sender_id = msg
                                 .from

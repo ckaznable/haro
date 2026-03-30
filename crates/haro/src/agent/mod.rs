@@ -1,8 +1,10 @@
 mod config;
 
 use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use sqlx::PgPool;
 use tracing::info;
 
 use crate::channel::{self, Channel};
@@ -38,7 +40,7 @@ pub struct Agent {
 ///     ├── config.toml
 ///     └── PROMPT.md
 /// ```
-pub fn load_agents(agents_path: &Path) -> Result<Vec<Agent>> {
+pub async fn load_agents(agents_path: &Path, pg: Arc<PgPool>) -> Result<Vec<Agent>> {
     let base = agents_path;
     if !base.is_dir() {
         return Ok(vec![]);
@@ -83,7 +85,7 @@ pub fn load_agents(agents_path: &Path) -> Result<Vec<Agent>> {
             .unwrap_or_default()
             .trim()
             .to_owned();
-        let channels = build_channels(&agent_cfg.channels)?;
+        let channels = build_channels(&id, &agent_cfg.channels, Arc::clone(&pg)).await?;
 
         let cmd_path = path.join("cmd.toml");
         let llm_commands = if cmd_path.exists() {
@@ -139,21 +141,47 @@ fn resolve_bot_token(cfg: &ChannelConfig) -> Result<String> {
     anyhow::bail!("需要設定 bot_token 或 bot_token_env")
 }
 
-pub fn build_channels(configs: &[ChannelConfig]) -> Result<Vec<Box<dyn Channel>>> {
+fn channel_scope(agent_id: &str, channel_type: &str, index: usize) -> String {
+    format!("{agent_id}:{channel_type}:{index}")
+}
+
+pub async fn build_channels(
+    agent_id: &str,
+    configs: &[ChannelConfig],
+    pg: Arc<PgPool>,
+) -> Result<Vec<Box<dyn Channel>>> {
     let mut channels: Vec<Box<dyn Channel>> = Vec::new();
 
-    for cfg in configs {
+    for (index, cfg) in configs.iter().enumerate() {
         match cfg.channel_type.as_str() {
             "telegram" => {
                 let token = resolve_bot_token(cfg)?;
-                channels.push(Box::new(channel::telegram::TelegramChannel::new(
-                    &token,
-                    &cfg.allowed_users,
-                )));
+                channels.push(Box::new(
+                    channel::telegram::TelegramChannel::new(
+                        &token,
+                        &cfg.allowed_users,
+                        channel_scope(agent_id, &cfg.channel_type, index),
+                        Arc::clone(&pg),
+                    )
+                    .await?,
+                ));
             }
             other => anyhow::bail!("未知的 channel 類型: {other}"),
         }
     }
 
     Ok(channels)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::channel_scope;
+
+    #[test]
+    fn test_channel_scope_format() {
+        assert_eq!(
+            channel_scope("agent-a", "telegram", 2),
+            "agent-a:telegram:2"
+        );
+    }
 }
