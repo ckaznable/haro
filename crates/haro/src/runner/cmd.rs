@@ -201,7 +201,7 @@ fn register_scheduler(reg: &mut CommandRegistry, ctx: &CmdContext<'_>) {
                                 && let Ok(text) = &other
                                 && let Some(id) = extract_removed_id(text, "排程任務")
                             {
-                                pool.abort(&id);
+                                pool.abort_cron(&id);
                             }
                             return other;
                         }
@@ -218,7 +218,7 @@ fn register_scheduler(reg: &mut CommandRegistry, ctx: &CmdContext<'_>) {
                     let result =
                         api::chat_with_tools(worker.as_ref(), system, &args, &tools, None).await?;
                     if let Ok(config) = tool::cron::load_config(&cp) {
-                        let running = pool.running_ids();
+                        let running = pool.running_cron_ids();
                         for job in config.jobs.iter().filter(|j| j.enabled) {
                             if !running.contains(&job.id) {
                                 pool.spawn_cron(job);
@@ -261,7 +261,7 @@ fn register_scheduler(reg: &mut CommandRegistry, ctx: &CmdContext<'_>) {
                                 && let Ok(text) = &other
                                 && let Some(id) = extract_removed_id(text, "一次性任務")
                             {
-                                pool.abort(&id);
+                                pool.abort_task(&id);
                             }
                             return other;
                         }
@@ -278,7 +278,7 @@ fn register_scheduler(reg: &mut CommandRegistry, ctx: &CmdContext<'_>) {
                     let result =
                         api::chat_with_tools(worker.as_ref(), system, &args, &tools, None).await?;
                     if let Ok(config) = tool::task::load_config(&tp) {
-                        let running = pool.running_ids();
+                        let running = pool.running_task_ids();
                         for task in &config.tasks {
                             if !running.contains(&task.id) {
                                 pool.spawn_task(task);

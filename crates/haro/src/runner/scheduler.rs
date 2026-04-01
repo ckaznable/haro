@@ -2,7 +2,8 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use chrono::Local;
+use anyhow::{Result, anyhow};
+use chrono::{Local, Offset};
 use tokio::task::AbortHandle;
 use tracing::{error, info, warn};
 
@@ -65,20 +66,21 @@ impl RunningPool {
         let prompt = job.prompt.clone();
         let executor_type = job.executor.clone();
         let pool = Arc::clone(self);
-        let pool_key = id.clone();
+        let pool_key = cron_runtime_key(&id);
+        let handle_key = pool_key.clone();
 
         // 先中止同名的舊 task（避免孤兒 leak）
-        self.abort(&id);
+        self.abort_cron(&id);
 
         let handle = tokio::spawn(async move {
-            run_cron_loop(&pool.res, &pool_key, &cron_expr, &prompt, &executor_type).await;
-            pool.handles.lock().unwrap().remove(&pool_key);
+            run_cron_loop(&pool.res, &id, &cron_expr, &prompt, &executor_type).await;
+            pool.handles.lock().unwrap().remove(&handle_key);
         });
 
         self.handles
             .lock()
             .unwrap()
-            .insert(id, handle.abort_handle());
+            .insert(pool_key, handle.abort_handle());
     }
 
     /// 啟動單一一次性任務
@@ -88,24 +90,37 @@ impl RunningPool {
         let prompt = task.prompt.clone();
         let executor_type = task.executor.clone();
         let pool = Arc::clone(self);
-        let pool_key = id.clone();
+        let pool_key = task_runtime_key(&id);
+        let handle_key = pool_key.clone();
 
         // 先中止同名的舊 task（避免孤兒 leak）
-        self.abort(&id);
+        self.abort_task(&id);
 
         let handle = tokio::spawn(async move {
-            run_once(&pool.res, &pool_key, &run_at, &prompt, &executor_type).await;
-            // 完成後從 tasks.toml 刪除
-            if let Err(e) = tool::task::remove_task(&pool.res.tasks_path, &pool_key) {
-                error!(agent_id = %pool.res.agent_id, task_id = %pool_key, "刪除已完成任務失敗: {e:#}");
+            match run_once(&pool.res, &id, &run_at, &prompt, &executor_type).await {
+                Ok(()) => {
+                    // 僅在成功執行後才從 tasks.toml 刪除，避免失敗任務靜默消失
+                    if let Err(e) = tool::task::remove_task(&pool.res.tasks_path, &id) {
+                        error!(agent_id = %pool.res.agent_id, task_id = %id, "刪除已完成任務失敗: {e:#}");
+                    }
+                }
+                Err(e) => {
+                    error!(
+                        agent_id = %pool.res.agent_id,
+                        task_id = %id,
+                        run_at = %run_at,
+                        executor = %executor_type,
+                        "一次性任務執行失敗，保留 tasks.toml 項目以便重試: {e:#}"
+                    );
+                }
             }
-            pool.handles.lock().unwrap().remove(&pool_key);
+            pool.handles.lock().unwrap().remove(&handle_key);
         });
 
         self.handles
             .lock()
             .unwrap()
-            .insert(id, handle.abort_handle());
+            .insert(pool_key, handle.abort_handle());
     }
 
     /// 中止指定事件
@@ -118,13 +133,29 @@ impl RunningPool {
         }
     }
 
+    pub fn abort_cron(&self, id: &str) -> bool {
+        self.abort(&cron_runtime_key(id))
+    }
+
+    pub fn abort_task(&self, id: &str) -> bool {
+        self.abort(&task_runtime_key(id))
+    }
+
     /// 列出目前正在執行的事件 ID
-    pub fn running_ids(&self) -> Vec<String> {
+    pub fn running_cron_ids(&self) -> Vec<String> {
+        self.running_ids_with_prefix("cron:")
+    }
+
+    pub fn running_task_ids(&self) -> Vec<String> {
+        self.running_ids_with_prefix("task:")
+    }
+
+    fn running_ids_with_prefix(&self, prefix: &str) -> Vec<String> {
         let guard = self.handles.lock().unwrap();
         guard
             .iter()
-            .filter(|(_, h)| !h.is_finished())
-            .map(|(id, _)| id.clone())
+            .filter(|(id, h)| id.starts_with(prefix) && !h.is_finished())
+            .map(|(id, _)| id.trim_start_matches(prefix).to_owned())
             .collect()
     }
 }
@@ -168,7 +199,9 @@ async fn run_cron_loop(
         tokio::time::sleep(wait).await;
 
         info!(agent_id = %res.agent_id, job_id = %id, executor = %executor_type, "觸發 cron 任務");
-        execute_job(res, &format!("cron「{id}」"), prompt, executor_type).await;
+        if let Err(e) = execute_job(res, &format!("cron「{id}」"), prompt, executor_type).await {
+            error!(agent_id = %res.agent_id, job_id = %id, executor = %executor_type, "cron 任務失敗: {e:#}");
+        }
     }
 }
 
@@ -179,14 +212,8 @@ async fn run_once(
     run_at: &str,
     prompt: &str,
     executor_type: &Executor,
-) {
-    let dt = match chrono::DateTime::parse_from_rfc3339(run_at) {
-        Ok(dt) => dt.with_timezone(&Local),
-        Err(e) => {
-            error!(agent_id = %res.agent_id, task_id = %id, "時間格式無效: {e}");
-            return;
-        }
-    };
+) -> Result<()> {
+    let dt = parse_task_run_at(run_at).map_err(|e| anyhow!("task_id={id} 時間格式無效: {e}"))?;
 
     let now = Local::now();
     if dt > now {
@@ -202,7 +229,7 @@ async fn run_once(
     }
 
     info!(agent_id = %res.agent_id, task_id = %id, executor = %executor_type, "觸發一次性任務");
-    execute_job(res, &format!("一次性任務「{id}」"), prompt, executor_type).await;
+    execute_job(res, &format!("一次性任務「{id}」"), prompt, executor_type).await
 }
 
 /// 實際執行排程任務（cron / 一次性共用）
@@ -211,7 +238,7 @@ async fn execute_job(
     event_label: &str,
     prompt: &str,
     executor_type: &Executor,
-) {
+) -> Result<()> {
     let (executor, model_name): (&api::gemini::GeminiProvider, &str) = match executor_type {
         Executor::Worker => (res.worker.as_ref(), &res.worker_model),
         Executor::Llm => (res.llm.as_ref(), &res.llm_model),
@@ -267,48 +294,90 @@ async fn execute_job(
 
     let user_message = format!("{event_label}觸發，請執行：\n\n{prompt}");
 
-    let result = api::chat_with_tools(executor, &system, &user_message, &tools, None).await;
+    let r = api::chat_with_tools(executor, &system, &user_message, &tools, None)
+        .await
+        .map_err(|e| anyhow!("LLM 執行失敗: {e:#}"))?;
 
-    match result {
-        Ok(r) => {
-            let _ = db::postgres::insert_token_usage(
-                &res.pg,
-                &res.agent_id,
-                model_name,
-                r.input_tokens,
-                r.output_tokens,
-            )
-            .await;
+    let _ = db::postgres::insert_token_usage(
+        &res.pg,
+        &res.agent_id,
+        model_name,
+        r.input_tokens,
+        r.output_tokens,
+    )
+    .await;
 
-            if !res.notifiers.is_empty() {
-                let message = r.text.trim();
-                if message.is_empty() {
-                    warn!(agent_id = %res.agent_id, event = %event_label, "排程任務回覆為空，略過通知");
-                } else {
-                    let mut sent = 0usize;
-                    let mut failed = 0usize;
-                    for notifier in &res.notifiers {
-                        match notifier.send(message).await {
-                            Ok(()) => sent += 1,
-                            Err(e) => {
-                                failed += 1;
-                                error!(agent_id = %res.agent_id, event = %event_label, "推送排程結果失敗: {e:#}");
-                            }
-                        }
+    if !res.notifiers.is_empty() {
+        let message = r.text.trim();
+        if message.is_empty() {
+            warn!(agent_id = %res.agent_id, event = %event_label, "排程任務回覆為空，略過通知");
+        } else {
+            let mut sent = 0usize;
+            let mut failed = 0usize;
+            for notifier in &res.notifiers {
+                match notifier.send(message).await {
+                    Ok(()) => sent += 1,
+                    Err(e) => {
+                        failed += 1;
+                        error!(agent_id = %res.agent_id, event = %event_label, "推送排程結果失敗: {e:#}");
                     }
-                    info!(
-                        agent_id = %res.agent_id,
-                        event = %event_label,
-                        sent,
-                        failed,
-                        "排程結果已推送到 notifier"
-                    );
                 }
             }
-            info!(agent_id = %res.agent_id, event = %event_label, "排程任務完成");
+            info!(
+                agent_id = %res.agent_id,
+                event = %event_label,
+                sent,
+                failed,
+                "排程結果已推送到 notifier"
+            );
         }
-        Err(e) => {
-            error!(agent_id = %res.agent_id, event = %event_label, "排程任務失敗: {e:#}");
-        }
+    }
+
+    info!(agent_id = %res.agent_id, event = %event_label, "排程任務完成");
+    Ok(())
+}
+
+fn cron_runtime_key(id: &str) -> String {
+    format!("cron:{id}")
+}
+
+fn task_runtime_key(id: &str) -> String {
+    format!("task:{id}")
+}
+
+fn parse_task_run_at(run_at: &str) -> Result<chrono::DateTime<Local>> {
+    let dt = chrono::DateTime::parse_from_rfc3339(run_at).or_else(|_| {
+        chrono::NaiveDateTime::parse_from_str(run_at, "%Y-%m-%d %H:%M")
+            .or_else(|_| chrono::NaiveDateTime::parse_from_str(run_at, "%Y-%m-%dT%H:%M"))
+            .or_else(|_| chrono::NaiveDateTime::parse_from_str(run_at, "%Y-%m-%d %H:%M:%S"))
+            .or_else(|_| chrono::NaiveDateTime::parse_from_str(run_at, "%Y-%m-%dT%H:%M:%S"))
+            .map(|naive| {
+                let local_offset = Local::now().offset().fix();
+                naive
+                    .and_local_timezone(local_offset)
+                    .single()
+                    .ok_or_else(|| anyhow!("本地時間無法唯一解析"))
+            })?
+    })?;
+    Ok(dt.with_timezone(&Local))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_keys_do_not_collide_between_cron_and_task() {
+        assert_ne!(cron_runtime_key("same-id"), task_runtime_key("same-id"));
+    }
+
+    #[test]
+    fn parse_task_run_at_rejects_invalid_datetime() {
+        assert!(parse_task_run_at("not-a-datetime").is_err());
+    }
+
+    #[test]
+    fn parse_task_run_at_accepts_legacy_local_format() {
+        assert!(parse_task_run_at("2026-04-01 12:34").is_ok());
     }
 }
