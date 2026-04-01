@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -36,6 +36,8 @@ pub(crate) struct RunningPool {
     handles: std::sync::Mutex<HashMap<String, AbortHandle>>,
 }
 
+const TASK_SYNC_INTERVAL_SECS: u64 = 10;
+
 impl RunningPool {
     pub fn new(res: SchedulerResources) -> Arc<Self> {
         Arc::new(Self {
@@ -54,9 +56,18 @@ impl RunningPool {
 
         // One-time tasks
         let tasks_config = tool::task::load_config(tasks_path).unwrap_or_default();
+        info!(
+            agent_id = %self.res.agent_id,
+            tasks_path = %tasks_path.display(),
+            task_count = tasks_config.tasks.len(),
+            "載入一次性任務設定"
+        );
         for task in &tasks_config.tasks {
             self.spawn_task(task);
         }
+
+        // 低頻同步：讓 add_task（非 /task 路徑）也能被 runtime 讀到
+        self.spawn_task_sync_loop(tasks_path.to_path_buf());
     }
 
     /// 啟動單一 cron job（自帶內部迴圈）
@@ -95,6 +106,14 @@ impl RunningPool {
 
         // 先中止同名的舊 task（避免孤兒 leak）
         self.abort_task(&id);
+
+        info!(
+            agent_id = %self.res.agent_id,
+            task_id = %id,
+            run_at = %run_at,
+            executor = %executor_type,
+            "註冊一次性任務 runtime"
+        );
 
         let handle = tokio::spawn(async move {
             match run_once(&pool.res, &id, &run_at, &prompt, &executor_type).await {
@@ -158,6 +177,58 @@ impl RunningPool {
             .map(|(id, _)| id.trim_start_matches(prefix).to_owned())
             .collect()
     }
+
+    fn spawn_task_sync_loop(self: &Arc<Self>, tasks_path: std::path::PathBuf) {
+        let pool = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut ticker =
+                tokio::time::interval(std::time::Duration::from_secs(TASK_SYNC_INTERVAL_SECS));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+            loop {
+                ticker.tick().await;
+                if let Err(e) = pool.sync_missing_tasks_from_disk(&tasks_path) {
+                    error!(
+                        agent_id = %pool.res.agent_id,
+                        tasks_path = %tasks_path.display(),
+                        "低頻同步一次性任務失敗: {e:#}"
+                    );
+                }
+            }
+        });
+    }
+
+    fn sync_missing_tasks_from_disk(self: &Arc<Self>, tasks_path: &std::path::Path) -> Result<()> {
+        let config = tool::task::load_config(tasks_path)?;
+        let running: HashSet<String> = self.running_task_ids().into_iter().collect();
+
+        let mut spawned = 0usize;
+        for task in &config.tasks {
+            if running.contains(&task.id) {
+                continue;
+            }
+            info!(
+                agent_id = %self.res.agent_id,
+                task_id = %task.id,
+                run_at = %task.run_at,
+                executor = %task.executor,
+                "偵測到尚未載入 runtime 的一次性任務，補註冊"
+            );
+            self.spawn_task(task);
+            spawned += 1;
+        }
+
+        if spawned > 0 {
+            info!(
+                agent_id = %self.res.agent_id,
+                spawned,
+                interval_secs = TASK_SYNC_INTERVAL_SECS,
+                "一次性任務低頻同步完成"
+            );
+        }
+
+        Ok(())
+    }
 }
 
 /// 單一 cron job 的內部迴圈
@@ -216,15 +287,26 @@ async fn run_once(
     let dt = parse_task_run_at(run_at).map_err(|e| anyhow!("task_id={id} 時間格式無效: {e}"))?;
 
     let now = Local::now();
-    if dt > now {
-        let wait = (dt - now).to_std().unwrap_or(std::time::Duration::ZERO);
-        info!(
-            agent_id = %res.agent_id,
-            task_id = %id,
-            run_at = %dt.format("%Y-%m-%d %H:%M:%S"),
-            wait_secs = wait.as_secs(),
-            "一次性任務等待觸發"
-        );
+    let wait = if dt > now {
+        (dt - now).to_std().unwrap_or(std::time::Duration::ZERO)
+    } else {
+        std::time::Duration::ZERO
+    };
+    let overdue_secs = if dt <= now {
+        (now - dt).num_seconds().max(0)
+    } else {
+        0
+    };
+    info!(
+        agent_id = %res.agent_id,
+        task_id = %id,
+        run_at = %dt.format("%Y-%m-%d %H:%M:%S %:z"),
+        now = %now.format("%Y-%m-%d %H:%M:%S %:z"),
+        wait_secs = wait.as_secs(),
+        overdue_secs,
+        "一次性任務等待時間計算完成"
+    );
+    if !wait.is_zero() {
         tokio::time::sleep(wait).await;
     }
 
