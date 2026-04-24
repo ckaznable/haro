@@ -25,6 +25,7 @@ pub(crate) struct HeartbeatTask {
     pub llm_model: String,
     pub notifiers: Vec<Arc<dyn Notifier>>,
     pub searxng_url: Option<String>,
+    pub saachi_url: Option<String>,
     pub agent_path: Option<std::path::PathBuf>,
 }
 
@@ -87,6 +88,9 @@ pub(crate) async fn run_heartbeat(task: HeartbeatTask) -> Result<()> {
         }
         if let Some(ref url) = task.searxng_url {
             tools.register(tool::searxng::tool(url.clone()));
+        }
+        if let Some(ref url) = task.saachi_url {
+            tools.register(tool::saachi::tool(url.clone()));
         }
         if let Some(ref ap) = task.agent_path {
             for t in tool::heartbeat::tools(ap.clone()) {

@@ -2,6 +2,7 @@ pub mod cron;
 pub mod fetch;
 pub mod heartbeat;
 pub mod notify;
+pub mod saachi;
 pub mod scratchpad;
 pub mod search;
 pub mod searxng;

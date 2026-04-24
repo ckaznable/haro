@@ -60,6 +60,9 @@ thinking_budget = 0
 # SearXNG 搜尋引擎 base URL（設定後 LLM 可使用 web_search 工具）
 # searxng_url = "http://localhost:8080"
 
+# Saachi 搜尋服務 base URL（設定後 LLM 可使用 saachi_search 工具）
+# saachi_url = "http://localhost:3000"
+
 # 大腦模型（BRAIN_HEARTBEAT.md 觸發時使用），未設定則使用 llm
 # [brain]
 # provider = "gemini"

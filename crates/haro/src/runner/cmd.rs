@@ -165,6 +165,7 @@ fn register_scheduler(reg: &mut CommandRegistry, ctx: &CmdContext<'_>) {
         worker_model: ctx.cfg.worker.model.clone(),
         notifiers: ctx.notifiers.to_vec(),
         searxng_url: ctx.cfg.searxng_url.clone(),
+        saachi_url: ctx.cfg.saachi_url.clone(),
         skills_path: ctx.skills_path.clone(),
     });
 
@@ -345,6 +346,7 @@ fn register_ask(reg: &mut CommandRegistry, ctx: &CmdContext<'_>) {
         skills_path: ctx.skills_path.clone(),
         agent_path: ctx.agent_path.clone(),
         searxng_url: ctx.cfg.searxng_url.clone(),
+        saachi_url: ctx.cfg.saachi_url.clone(),
     });
     reg.register(
         "ask",
@@ -374,6 +376,8 @@ fn register_llm_commands(reg: &mut CommandRegistry, ctx: &CmdContext<'_>) {
         let soul = ctx.agent_soul.to_owned();
         let prompt = ctx.agent_prompt.to_owned();
         let aid = ctx.agent_id.to_owned();
+        let searxng_url = ctx.cfg.searxng_url.clone();
+        let saachi_url = ctx.cfg.saachi_url.clone();
 
         reg.register(
             cmd_def.name.clone(),
@@ -387,6 +391,8 @@ fn register_llm_commands(reg: &mut CommandRegistry, ctx: &CmdContext<'_>) {
                 let soul = soul.clone();
                 let prompt = prompt.clone();
                 let aid = aid.clone();
+                let searxng_url = searxng_url.clone();
+                let saachi_url = saachi_url.clone();
                 Box::pin(async move {
                     let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %:z");
 
@@ -419,7 +425,17 @@ fn register_llm_commands(reg: &mut CommandRegistry, ctx: &CmdContext<'_>) {
                         })
                         .await?
                     } else {
-                        let tools = tool::build_registry(&cmd_tools, &pg, &aid);
+                        let mut tools = tool::build_registry(&cmd_tools, &pg, &aid);
+                        if cmd_tools.iter().any(|name| name == "web_search")
+                            && let Some(url) = searxng_url
+                        {
+                            tools.register(tool::searxng::tool(url));
+                        }
+                        if cmd_tools.iter().any(|name| name == "saachi_search")
+                            && let Some(url) = saachi_url
+                        {
+                            tools.register(tool::saachi::tool(url));
+                        }
                         api::chat_with_tools(llm.as_ref(), &system, &user_message, &tools, None)
                             .await?
                     };
@@ -440,6 +456,7 @@ fn register_tools(reg: &mut CommandRegistry, ctx: &CmdContext<'_>) {
     let skills_path = ctx.skills_path.clone();
     let agent_path = ctx.agent_path.clone();
     let searxng_url = ctx.cfg.searxng_url.clone();
+    let saachi_url = ctx.cfg.saachi_url.clone();
     let notifiers: Vec<Arc<dyn Notifier>> = ctx.notifiers.to_vec();
     reg.register(
         "tools",
@@ -452,6 +469,7 @@ fn register_tools(reg: &mut CommandRegistry, ctx: &CmdContext<'_>) {
             let sp = skills_path.clone();
             let ap = agent_path.clone();
             let searxng = searxng_url.clone();
+            let saachi = saachi_url.clone();
             let notifiers = notifiers.clone();
             Box::pin(async move {
                 let mut registry = tool::ToolRegistry::new();
@@ -464,6 +482,9 @@ fn register_tools(reg: &mut CommandRegistry, ctx: &CmdContext<'_>) {
                 }
                 if let Some(ref url) = searxng {
                     registry.register(tool::searxng::tool(url.clone()));
+                }
+                if let Some(ref url) = saachi {
+                    registry.register(tool::saachi::tool(url.clone()));
                 }
                 if let Some(ref ap) = ap {
                     for t in tool::heartbeat::tools(ap.clone()) {

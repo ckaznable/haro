@@ -73,6 +73,7 @@ pub fn spawn_all(
                     llm_model: cfg.llm.model.clone(),
                     notifiers: notifiers.clone(),
                     searxng_url: cfg.searxng_url.clone(),
+                    saachi_url: cfg.saachi_url.clone(),
                     agent_path: agent_path.clone(),
                 },
             )));
@@ -93,6 +94,7 @@ pub fn spawn_all(
                     llm_model: brain_model.clone(),
                     notifiers: notifiers.clone(),
                     searxng_url: cfg.searxng_url.clone(),
+                    saachi_url: cfg.saachi_url.clone(),
                     agent_path: agent_path.clone(),
                 },
             )));
@@ -154,6 +156,7 @@ pub fn spawn_all(
                 skills_path: skills_path.clone(),
                 agent_path: agent_path.clone(),
                 searxng_url: cfg.searxng_url.clone(),
+                saachi_url: cfg.saachi_url.clone(),
             });
 
             let mode = agent_mode.clone();
@@ -229,6 +232,8 @@ struct MessageContext {
     agent_path: Option<std::path::PathBuf>,
     /// SearXNG base URL（None = 不啟用）
     searxng_url: Option<String>,
+    /// Saachi base URL（None = 不啟用）
+    saachi_url: Option<String>,
 }
 
 /// 將 channel::ImageData 轉換為 api::ImageInput
@@ -319,6 +324,9 @@ async fn handle_query(
     }
     if let Some(ref url) = ctx.searxng_url {
         tools.register(tool::searxng::tool(url.clone()));
+    }
+    if let Some(ref url) = ctx.saachi_url {
+        tools.register(tool::saachi::tool(url.clone()));
     }
 
     // 註冊 heartbeat + cron 工具（如有 agent 目錄）

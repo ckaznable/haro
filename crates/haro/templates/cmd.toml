@@ -21,6 +21,7 @@ tools = ["fetch"]
 
 # 可用工具：save_memo, read_memo, fetch
 # 以下工具需在 config.toml 啟用對應設定後才可使用：
-#   google_search — 需要 llm.grounding = true
-#   web_search    — 需要 searxng_url 設定
+#   google_search  — 需要 llm.grounding = true
+#   web_search     — 需要 searxng_url 設定
+#   saachi_search  — 需要 saachi_url 設定
 # tools 留空或不寫 = 純 LLM 生成，不使用工具

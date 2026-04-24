@@ -27,6 +27,7 @@ pub(crate) struct SchedulerResources {
     pub worker_model: String,
     pub notifiers: Vec<Arc<dyn Notifier>>,
     pub searxng_url: Option<String>,
+    pub saachi_url: Option<String>,
     pub skills_path: Option<std::path::PathBuf>,
 }
 
@@ -342,6 +343,9 @@ async fn execute_job(
     }
     if let Some(ref url) = res.searxng_url {
         tools.register(tool::searxng::tool(url.clone()));
+    }
+    if let Some(ref url) = res.saachi_url {
+        tools.register(tool::saachi::tool(url.clone()));
     }
     if let Some(ref sp) = res.skills_path {
         for t in tool::skills::tools(sp.clone()) {

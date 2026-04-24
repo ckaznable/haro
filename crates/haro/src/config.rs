@@ -32,6 +32,8 @@ pub struct AppConfig {
     pub heartbeat_interval: u64,
     /// SearXNG 搜尋引擎 base URL（設定後啟用搜尋工具）
     pub searxng_url: Option<String>,
+    /// Saachi 搜尋服務 base URL（設定後啟用 saachi_search 工具）
+    pub saachi_url: Option<String>,
 }
 
 fn default_heartbeat_interval() -> u64 {
