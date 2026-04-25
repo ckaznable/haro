@@ -130,6 +130,9 @@ impl AppConfig {
             cfg.qdrant.url = v;
         }
 
+        cfg.searxng_url = normalize_optional_url(cfg.searxng_url, "searxng_url")?;
+        cfg.saachi_url = normalize_optional_url(cfg.saachi_url, "saachi_url")?;
+
         // api_key_env 解析
         cfg.embedding.resolve_api_key_env("embedding")?;
         cfg.llm.resolve_api_key_env("llm")?;
@@ -203,4 +206,58 @@ pub fn default_agents_dir() -> PathBuf {
         .as_ref()
         .map(|d| d.data_local_dir().join("agents"))
         .unwrap_or_else(|| PathBuf::from("agents"))
+}
+
+fn normalize_optional_url(value: Option<String>, field: &str) -> Result<Option<String>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    let url = reqwest::Url::parse(trimmed)
+        .map_err(|_| anyhow::anyhow!("{field} 必須是完整 URL，例如 http://localhost:3000"))?;
+    match url.scheme() {
+        "http" | "https" if url.has_host() => Ok(Some(trimmed.to_owned())),
+        _ => anyhow::bail!("{field} 必須是完整 HTTP(S) URL，例如 http://localhost:3000"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_optional_url_treats_blank_as_none() {
+        assert_eq!(
+            normalize_optional_url(Some("".into()), "saachi_url").unwrap(),
+            None
+        );
+        assert_eq!(
+            normalize_optional_url(Some("   ".into()), "saachi_url").unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn normalize_optional_url_trims_valid_url() {
+        assert_eq!(
+            normalize_optional_url(
+                Some(" http://saachi-service.saachi.svc.cluster.local ".into()),
+                "saachi_url"
+            )
+            .unwrap(),
+            Some("http://saachi-service.saachi.svc.cluster.local".into())
+        );
+    }
+
+    #[test]
+    fn normalize_optional_url_rejects_relative_url() {
+        let err = normalize_optional_url(Some("saachi-service:3000".into()), "saachi_url")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("saachi_url 必須是完整"));
+    }
 }
